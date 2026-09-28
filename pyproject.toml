@@ -1,0 +1,48 @@
+[project]
+name = "my-agent-alpha"
+version = "0.1.0"
+description = "个人 AI agent —— 仿造 gptme 的学习型重实现"
+readme = "README.md"
+authors = [
+    { name = "yangbiye", email = "yangbiye2025@163.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+my-agent-alpha = "my_agent_alpha:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18.2",
+    "pytest>=9.1.1",
+    "ruff>=0.16.9",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle 错误
+    "W",   # pycodestyle 警告
+    "F",   # pyflakes
+    "I",   # isort 导入排序
+    "UP",  # pyupgrade 语法现代化
+    "B",   # bugbear 常见陷阱
+    "SIM", # 代码简化
+    "RUF", # ruff 自身规则
+]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
