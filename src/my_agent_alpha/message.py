@@ -21,6 +21,10 @@ Role = Literal["system", "user", "assistant"]
 
 _ROLES: tuple[str, ...] = ("system", "user", "assistant")
 
+# 一等公民协议字符串:日志里的特殊标记消息(仿 gptme,崩溃恢复/中断识别就靠扫它们)
+INTERRUPT_CONTENT = "[interrupted]"
+LLM_REQUEST_FAILED_PREFIX = "[LLM 请求失败]"
+
 
 def utcnow() -> datetime:
     """带时区的当前 UTC 时间(日志里的时间戳统一用它,避免 naive datetime 歧义)。"""

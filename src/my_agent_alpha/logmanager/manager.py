@@ -50,7 +50,7 @@ def _jsonl_line(msg: Message) -> bytes:
     return json.dumps(msg.to_dict(), ensure_ascii=False, default=str).encode("utf-8") + b"\n"
 
 
-def _fsync_directory(path: Path) -> None: # 目录（os层面：目录=文件）文件强制落盘
+def _fsync_directory(path: Path) -> None:  # 目录（os层面：目录=文件）文件强制落盘
     """fsync 目录,让 os.replace 的改名本身持久化(部分平台不支持,容忍失败)。"""
     try:
         fd = os.open(path, os.O_RDONLY)
@@ -113,7 +113,8 @@ class Log:
         if len(self._persisted) > len(self._messages):
             return False  # 内存中被删减过
         for persisted, current in zip(self._persisted, self._messages, strict=False):
-            # self._persisted（persisted）, self._messages（current）的消息一一对照，有不同说明被改写过
+            # self._persisted（persisted）, self._messages（current）
+            # 的消息一一对照，有不同说明被改写过
             # strict=False:取较短的已落盘前缀作对照,后面的新消息不算
             if persisted is not current:
                 return False  # 内存前缀被改写或乱序
@@ -125,7 +126,7 @@ class Log:
         return True
 
     def _after_write(self, path: Path) -> None:
-        '''更新游标信息'''
+        """更新游标信息"""
         self._persisted = list(self._messages)
         self._persisted_path = path
         self._persisted_size = path.stat().st_size
@@ -152,17 +153,17 @@ class Log:
 
     def _rewrite_jsonl(self, path: Path) -> None:
         """原子全量重写:临时文件 + 无条件 fsync + os.replace + 目录 fsync。
-        
+
         也就是写临时文件，之后整体替换"""
         tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
         try:
             with open(tmp, "wb") as f:
                 for msg in self._messages:
-                    f.write(_jsonl_line(msg)) # 写临时文件
-                f.flush() # 进内核缓存
+                    f.write(_jsonl_line(msg))  # 写临时文件
+                f.flush()  # 进内核缓存
                 os.fsync(f.fileno())  # 强制临时文件数据落盘，无条件:数据必须先于 rename 落盘
-            os.replace(tmp, path)  #原子改名(要么成功要么没发生,不会出现半个名字)
-            _fsync_directory(path.parent) #  强制"目录"(目录也是个文件)落盘,让改名本身不丢
+            os.replace(tmp, path)  # 原子改名(要么成功要么没发生,不会出现半个名字)
+            _fsync_directory(path.parent)  #  强制"目录"(目录也是个文件)落盘,让改名本身不丢
         finally:
             # 异常时清掉残留临时文件(正常路径下 os.replace 已把它变成目标文件)
             if tmp.exists():
@@ -192,7 +193,7 @@ class Log:
         last_idx = len(raw_lines) - 1
         for i, raw in enumerate(raw_lines):
             if not raw.strip():
-                continue # 跳过空行
+                continue  # 跳过空行
             try:
                 text = raw.decode("utf-8")
                 messages.append(Message.from_dict(json.loads(text)))
@@ -202,7 +203,7 @@ class Log:
                     skipped_corrupt = True
                     break
                 raise ValueError(f"日志 {path} 第 {i + 1} 行损坏: {e}") from e
-        log = cls(messages) # 构造新log
+        log = cls(messages)  # 构造新log
         if not skipped_corrupt and path.exists():
             log._after_write(path)
         return log
