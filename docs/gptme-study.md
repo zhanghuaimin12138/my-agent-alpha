@@ -1,7 +1,7 @@
 # gptme 架构研究报告
 
 > 研究对象:[gptme/gptme](https://github.com/gptme/gptme) @ commit `f7bb348`(2026-09, v0.34.x)
-> 研究方式:8 个并行 agent 深读源码(约 98 万 token 阅读量),本文为综合报告;每个子系统的详细报告(英文,含 file:line 引用)见 [docs/gptme-study/](gptme-study/) 目录。
+> 研究方式:8 个并行 agent 深读源码(约 98 万 token 阅读量),本文为综合报告;每个子系统的详细报告(中文,含 file:line 引用)见 [docs/gptme-study/](gptme-study/) 目录(英文原版存于 git 历史)。
 > 目的:理解 gptme 的架构,为仿造开发(`my_agent_alpha`)提供蓝图。
 
 ---
