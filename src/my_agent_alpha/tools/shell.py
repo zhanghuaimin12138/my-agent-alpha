@@ -22,6 +22,7 @@ _MAX_OUTPUT_CHARS = int(os.environ.get("ALPHA_SHELL_MAX_OUTPUT", "8000"))
 
 
 def _truncate(text: str, limit: int) -> str:
+    """输出太长时砍中间留两头(开头结尾往往最有用),并注明砍了多少。"""
     if len(text) <= limit:
         return text
     keep = limit // 2
@@ -29,6 +30,11 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _save_full_output(command: str, text: str) -> Path | None:
+    """把完整输出存成一个文件(会话目录/tool-outputs/shell/ 下),返回文件路径。
+
+    终端里显示的是截断版,但完整版不能丢 —— 模型需要时可以自己去读这个文件。
+    没有会话目录(少数调用场景)就返回 None。
+    """
     logdir = get_logdir()
     if logdir is None:
         return None

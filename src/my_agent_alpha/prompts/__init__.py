@@ -1,8 +1,12 @@
-"""系统提示词组装(最小版)。
+"""系统提示词组装:模型每次对话开头看到的"说明书"。
 
-仿 gptme 的分层原则:静态内容(身份 + 工具文档)在前,易变内容(时间)最后,
-中间是天然的 prompt-cache 边界(阶段 2 接 apply_cache_control 时直接可用)。
-所有提示词消息 pinned + hide:发给模型、永不裁剪、不打印。
+说明书分两条消息,顺序有讲究:
+
+1. 静态部分(身份 + 工具调用规则 + 每个工具的用法示例):
+   每次会话内容都一样 —— 放在前面,服务商能对它做缓存,省钱;
+2. 动态部分(当前时间):每次都变 —— 放在最后,不让它弄脏前面的缓存。
+
+两条都标了 pinned(将来压缩上下文时不删)和 hide(发给模型但不打印到终端)。
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from datetime import datetime
 from my_agent_alpha.message import Message, utcnow
 from my_agent_alpha.tools.base import ToolSpec
 
+# 静态提示词正文:告诉模型它是谁、怎么调用工具(这是模型学会用工具的唯一途径)
 _IDENTITY = """\
 # 身份
 
@@ -41,7 +46,12 @@ ls -la
 
 
 def get_prompt(tools: Sequence[ToolSpec], *, now: datetime | None = None) -> list[Message]:
-    """组装系统提示词消息(调用方在会话开头追加一次进日志)。"""
+    """生成会话开头的系统提示词消息(两条),调用方把它们写进日志一次即可。
+
+    示例:返回
+    [Message("system", 身份+工具文档, pinned=True, hide=True),
+     Message("system", "# 当前时间\\n2026-09-29 10:00:00 UTC", pinned=True, hide=True)]
+    """
     tool_docs = "\n\n---\n\n".join(t.get_tool_prompt() for t in tools)
     parts = [_IDENTITY]
     if tool_docs:

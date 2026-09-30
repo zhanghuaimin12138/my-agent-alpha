@@ -24,6 +24,10 @@ _MAX_CHARS = 200_000  # 阶段 6 之前先用朴素字符上限兜底
 
 
 def _read_one(path: Path) -> str:
+    """读一个文件,返回"带行号的内容";各种读不了的情况返回错误说明(不抛异常)。
+
+    为什么带行号?模型下一步想改某几行时,可以精确说"改第 3-5 行"。
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:

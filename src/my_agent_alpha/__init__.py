@@ -30,7 +30,7 @@ __all__ = [
     "utcnow",
 ]
 
-_DEFAULT_MODEL = os.environ.get("ALPHA_MODEL", "mock/echo")
+_DEFAULT_MODEL = os.environ.get("ALPHA_MODEL", "mock/echo")#得到默认模型
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -99,11 +99,11 @@ def test_provider_error_interactive_returns_to_prompt(
     real_reply = chat_mod.reply
     flaky_state = {"failed": False}
 
-    def flaky_reply(messages, model):  # type: ignore[no-untyped-def]
+    def flaky_reply(messages, model, **kwargs):  # type: ignore[no-untyped-def]
         if not flaky_state["failed"]:
             flaky_state["failed"] = True
             raise RuntimeError("模拟网络错误")
-        return real_reply(messages, "mock/echo")
+        return real_reply(messages, "mock/echo", **kwargs)
 
     monkeypatch.setattr(chat_mod, "reply", flaky_reply)
 

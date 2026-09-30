@@ -1,7 +1,8 @@
-"""XDG 风格的路径解析(零依赖版)。
+"""路径计算:程序的数据应该放在哪。
 
-阶段 0 只面向 Linux/macOS(手动解析 XDG 环境变量);
-将来需要支持 Windows 时再引入 platformdirs(gptme 的选择)。
+Linux 有个惯例(叫 XDG 规范):用户数据放 ~/.local/share/<程序名>/,
+配置放 ~/.config/<程序名>/,而不是在家目录里到处建点开头的文件夹。
+我们遵守这个惯例;支持 Windows 时再换 platformdirs 库处理。
 """
 
 from __future__ import annotations
@@ -14,7 +15,11 @@ _LOGS_HOME_ENV = "ALPHA_LOGS_HOME"
 
 
 def get_data_dir() -> Path:
-    """数据目录:<XDG_DATA_HOME 或 ~/.local/share>/my_agent_alpha(不存在则创建)。"""
+    """返回程序的数据目录(不存在则创建)。
+
+    默认 ~/.local/share/my_agent_alpha;
+    如果系统设置了 XDG_DATA_HOME 环境变量,则用它替代 ~/.local/share。
+    """
     xdg = os.environ.get("XDG_DATA_HOME")
     base = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "share"
     data_dir = base / "my_agent_alpha"
@@ -23,7 +28,11 @@ def get_data_dir() -> Path:
 
 
 def get_logs_dir() -> Path:
-    """会话日志根目录,可用 ALPHA_LOGS_HOME 覆盖(测试与多环境隔离用)。"""
+    """返回所有会话日志的根目录(不存在则创建)。
+
+    默认是 数据目录/logs,即 ~/.local/share/my_agent_alpha/logs;
+    设置环境变量 ALPHA_LOGS_HOME 可以改到别处(测试时用来和真实数据隔离)。
+    """
     override = os.environ.get(_LOGS_HOME_ENV)
     logs_dir = Path(override).expanduser() if override else get_data_dir() / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)

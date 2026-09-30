@@ -22,6 +22,7 @@ _PLACEHOLDERS = ("# ...", "# TODO: implement", "...", "…")
 
 
 def _resolve(path_str: str) -> Path:
+    """把路径解析成绝对路径:相对路径以当前工作区为基准。"""
     p = Path(path_str)
     return p if p.is_absolute() else get_workspace() / p
 
@@ -35,6 +36,10 @@ def _check_placeholder(path: Path, content: str) -> str | None:
 
 
 def _validate(code: str | None, args: list[str] | None) -> tuple[Path, str] | str:
+    """检查参数并整理出(文件路径, 文件内容);参数不对时返回错误说明字符串。
+
+    约定:fence 头带路径,代码块就是文件内容,如 ```save a.txt\n内容\n```。
+    """
     if not args:
         return "错误: save/append 的 fence 头需要路径参数,如 ```save path/to/file"
     assert code is not None
@@ -44,6 +49,10 @@ def _validate(code: str | None, args: list[str] | None) -> tuple[Path, str] | st
 def execute_save(
     code: str | None, args: list[str] | None, kwargs: dict[str, str] | None
 ) -> Iterator[Message]:
+    """save 工具的执行函数:把内容写成文件(文件已存在就整个覆盖)。
+
+    示例:```save a.txt\\n你好\\n``` → 在工作区创建 a.txt,内容"你好\\n"。
+    """
     validated = _validate(code, args)
     if isinstance(validated, str):
         yield Message("system", validated)
@@ -62,6 +71,11 @@ def execute_save(
 def execute_append(
     code: str | None, args: list[str] | None, kwargs: dict[str, str] | None
 ) -> Iterator[Message]:
+    """append 工具的执行函数:把内容追加到文件末尾(文件不存在就新建)。
+
+    自动处理换行:原文件末尾没换行会先补一个,新内容也保证以换行结尾,
+    避免新内容黏在旧内容的行尾上。
+    """
     validated = _validate(code, args)
     if isinstance(validated, str):
         yield Message("system", validated)

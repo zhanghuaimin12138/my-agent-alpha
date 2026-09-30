@@ -1,22 +1,19 @@
-"""append-only JSONL 会话日志(仿 gptme LogManager 的持久化核心)。
+"""会话日志:把对话保存成 JSONL 文件(每行一条消息的 JSON),只增不改。
 
-设计要点(研究精华 #9,见 docs/gptme-study.md §11):
+仿 gptme LogManager 的持久化设计,核心解决两个问题:
 
-- 追加游标:常规写入只落盘"新增消息",O(新增);通过
-  (路径 + 文件字节数 + 已落盘前缀的对象身份 + 尾随换行)四重校验,
-  一旦发现文件被外部改动、或内存中前缀被改写/截断/乱序,自动降级为原子全量重写。
-- 原子全量重写:同目录临时文件 → 无条件 fsync → os.replace → 目录 fsync,
-  崩溃在任何时刻都不会毁掉上一份完整日志(重写路径无条件 fsync:重写本就少见,
-  且 rename 先于数据落盘是"空文件/垃圾文件"事故的经典成因)。
-- conversation.jsonl 永不销毁:主日志是唯一事实来源
-  (压缩视图/分支是后续阶段的事,那也是"写副本、切指针",不动主文件)。
-- 读取宽容:未知字段由 Message.from_dict 丢弃;末行损坏(崩溃时写了一半,包括
-  被切断的多字节 UTF-8 字符)容忍并告警,中间行损坏则报错 —— 损坏不该被静默吞掉。
-  跳过了残尾时游标保持"未知",下一次写入强制全量重写把残尾清掉 —— 否则
-  "容忍跳过 + 后续增量追加"会把坏行挤成中间行,日志从此打不开。
+1. 怎么写得快?—— 追加游标(见 Log 类):平时只在文件末尾追加新消息,
+   不重写整个文件;一旦发现文件或内存被意外改动,立即退回安全的"全量重写"。
+2. 怎么保证崩溃不丢数据?—— 全量重写走"临时文件 → fsync → 原子改名 → 目录 fsync"
+   四步,任何时刻断电,磁盘上要么是完整的新文件、要么是完整的旧文件,不会出现半个。
 
-阶段 0 刻意省略(详见 docs/devlog/001):文件锁(flock)、events.jsonl WAL、
-视图/分支机制、附件内容寻址存储。
+另外:conversation.jsonl 是对话的完整历史,永远不删除
+(以后做"压缩上下文"时也是另存副本,不改这个文件);
+读文件时,最后一行如果坏了(程序崩溃时只写了一半),跳过并告警;
+中间的行坏了则直接报错,因为那意味着日志被外力破坏,不能装作没看见。
+
+阶段 0 刻意省略(详见 docs/devlog/001):文件锁(多进程同时写)、事件日志(WAL)、
+视图/分支机制、附件存储。
 """
 
 from __future__ import annotations
@@ -37,21 +34,27 @@ CONVERSATION_FILENAME = "conversation.jsonl"
 
 
 def generate_conversation_id() -> str:
-    """会话目录名:YYYY-MMDD-<随机 6 位十六进制>。
+    """生成一个会话目录名,形如 "2026-0929-a3f1c2"(日期 + 随机码,保证不重名)。
 
-    (gptme 还会从首条消息生成语义 slug,属于自动命名线程,后续阶段再加。)
+    示例:logdir = 日志根目录 / generate_conversation_id()
     """
     return datetime.now().strftime("%Y-%m%d") + "-" + secrets.token_hex(3)
 
 
 def _jsonl_line(msg: Message) -> bytes:
-    # ensure_ascii=False:日志里的中文保持人类可读;
-    # default=str:metadata 里混进不可序列化对象时降级为字符串,不让一条消息毁掉整个写入
+    """把一条消息转成"一行 JSON + 换行符"的字节(写入文件的最小单位)。
+
+    ensure_ascii=False:中文直接写中文,人打开文件就能读;
+    default=str:metadata 里万一混进奇怪对象,降级成字符串,不让一条消息毁掉整个写入。
+    """
     return json.dumps(msg.to_dict(), ensure_ascii=False, default=str).encode("utf-8") + b"\n"
 
 
 def _fsync_directory(path: Path) -> None:  # 目录（os层面：目录=文件）文件强制落盘
-    """fsync 目录,让 os.replace 的改名本身持久化(部分平台不支持,容忍失败)。"""
+    """把目录本身的改动强制写入磁盘,让 os.replace 的改名不会因断电而丢失。
+
+    有的操作系统不支持对目录做 fsync,遇到就静默跳过(尽力而为)。
+    """
     try:
         fd = os.open(path, os.O_RDONLY)
     except OSError:
@@ -65,44 +68,61 @@ def _fsync_directory(path: Path) -> None:  # 目录（os层面：目录=文件�
 
 
 class Log:
-    """消息列表 + 持久化游标。
+    """内存里的消息列表 + 一个"写到哪了"的游标(书签)。
 
-    游标记录"哪些消息以什么身份写到了哪个文件的多少字节"。
-    惯用法:append() 追加内存消息,write_jsonl() 落盘并前移游标。
+    游标 = 一个书签,记着三件事:上次写到了哪个文件、写到第几字节、写了哪些消息。
+    有了它,追加一条消息只需要在文件末尾加一行,而不是重写全部消息。
+
+    惯常用法:
+        log = Log.read_jsonl(文件)   # 打开旧会话
+        log.append(Message(...))     # 内存里加一条
+        log.write_jsonl(文件)        # 落盘(内部自动选择"只加一行"或"全部重写")
     """
 
     def __init__(self, messages: Iterable[Message] = ()) -> None:
+        """新建 Log,可以带一批初始消息;游标为空(还没写过盘)。"""
         self._messages: list[Message] = list(messages)
-        # 已落盘前缀(按对象身份比较,而非相等 —— 相等无法区分"同内容的新对象")
+        # 已落盘的消息(书签的"读到第几页")。比较时用 is(是不是同一个对象),
+        # 不用 ==(内容相同不代表是同一条,比如复制出来的新消息)
         self._persisted: list[Message] = []
         self._persisted_path: Path | None = None
-        self._persisted_size: int = -1  # 落盘时的文件字节数;-1 表示未知
+        self._persisted_size: int = -1  # 上次写完时文件的大小(字节);-1 表示还没写过
 
     # ---- 只读访问 ----
 
     @property
     def messages(self) -> Sequence[Message]:
-        """消息列表(防御性拷贝;调用方不得绕过 append 修改)。"""
+        """返回所有消息的列表副本(改副本不影响日志内部,修改请走 append)。"""
         return list(self._messages)
 
     def __len__(self) -> int:
+        """消息条数:len(log)。"""
         return len(self._messages)
 
     def __iter__(self) -> Iterator[Message]:
+        """让 Log 可以被 for 循环:for msg in log。"""
         return iter(self._messages)
 
     def __getitem__(self, index: int) -> Message:
+        """按下标取消息:log[0] 是第一条。"""
         return self._messages[index]
 
     # ---- 修改 ----
 
     def append(self, msg: Message) -> None:
+        """在内存里追加一条消息(注意:还没写盘,写盘调用 write_jsonl)。"""
         self._messages.append(msg)
 
     # ---- 持久化 ----
 
     def _can_append(self, path: Path) -> bool:
-        """判断能否走增量追加路径(否则必须全量重写)。"""
+        """检查"只在文件末尾加新消息"是否安全;任何一项不满足就返回 False:
+
+        1. 上次就是写到这个文件,且知道写到第几字节(书签有效);
+        2. 文件现在的字节数 == 书签记录的字节数(没被别的程序动过);
+        3. 书签记录的那批消息,现在仍然是列表开头的那批对象(内存没被改过);
+        4. 文件最后一个字节是换行符(上次不是写到一半崩的)。
+        """
         if self._persisted_path != path or self._persisted_size < 0:
             return False
         try:
@@ -126,17 +146,20 @@ class Log:
         return True
 
     def _after_write(self, path: Path) -> None:
-        """更新游标信息"""
+        """更新游标信息"""  # 写盘成功后调用:把书签移到"现在"
         self._persisted = list(self._messages)
         self._persisted_path = path
         self._persisted_size = path.stat().st_size
 
     def write_jsonl(self, path: Path, *, sync: bool = False) -> None:
-        """把消息写入 path:能追加则只写新增,否则原子全量重写。
+        """把消息写入文件。安全时只追加新消息(快),不安全时全部重写(慢但保险)。
 
-        重写路径总是 fsync(文件 + 目录)—— 崩溃安全是它的存在意义;
-        sync=True 额外让增量追加路径也 fsync 文件,用于会话收尾等
-        需要强持久化的时刻(追加不改目录项,无需 fsync 目录)。
+        示例:
+            log = Log.read_jsonl(f); log.append(m); log.write_jsonl(f)
+            → 文件只在末尾多了一行,前面的字节原样不动。
+
+        sync=True 额外强制刷盘(fsync),用在"会话结束"这类必须确保落盘的时刻;
+        平时默认 False,操作系统自己挑时机刷盘,速度快。
         """
         path.parent.mkdir(parents=True, exist_ok=True)
         if self._can_append(path):
@@ -152,9 +175,14 @@ class Log:
         self._after_write(path)
 
     def _rewrite_jsonl(self, path: Path) -> None:
-        """原子全量重写:临时文件 + 无条件 fsync + os.replace + 目录 fsync。
+        """把全部消息重写进文件:先写临时文件,再一步替换旧文件。
 
-        也就是写临时文件，之后整体替换"""
+        也就是写临时文件，之后整体替换。
+
+        为什么这样安全:os.replace 是"原子"操作 —— 要么成功(新文件顶上),
+        要么失败(旧文件原样保留),不存在替换到一半的状态。
+        所以哪怕写到一半断电,磁盘上也总有至少一份完整日志。
+        """
         tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
         try:
             with open(tmp, "wb") as f:
@@ -174,16 +202,14 @@ class Log:
 
     @classmethod
     def read_jsonl(cls, path: Path) -> Log:
-        """从 JSONL 装载进内存。
+        """从 JSONL 文件读出所有消息,生成一个 Log(游标直接标到文件末尾)。
 
-        正常情况下把游标标到文件末尾(后续 append 走增量路径)。
-        末行损坏(崩溃时写了一半,包括被切断的多字节字符)容忍并告警,
-        但游标保持未知 → 下次写入强制全量重写,把残尾清掉
-        (否则后续增量追加会把坏行挤成中间行,日志从此打不开);
-        中间行损坏抛 ValueError —— 损坏不该被静默吞掉。
-
-        按字节读、逐行解码:整文件 read_text 会在多字节字符被撕裂时
-        直接抛 UnicodeDecodeError,连"容忍末行"的机会都没有。
+        对损坏的处理:
+        - 最后一行坏了(比如崩溃时只写了一半)→ 跳过它、打警告,会话照常打开;
+          同时故意不设游标,下次写盘会触发全量重写,把坏行清理掉;
+        - 中间的行坏了 → 抛 ValueError(说明日志被外力破坏,必须让人知道);
+        - 先按字节读、再逐行解码:如果一个中文字符被拦腰截断,
+          整个文件一次性解码会直接报错,逐行解码才有机会"只坏一行"。
         """
         messages: list[Message] = []
         skipped_corrupt = False
@@ -210,32 +236,43 @@ class Log:
 
 
 class LogManager:
-    """一个会话目录的有状态门面:装载 / 追加 / 写盘。
+    """管理"一个会话目录"的入口:负责打开/新建会话、追加消息并落盘。
 
-    目录布局:
-        <logs_dir>/<conversation-id>/conversation.jsonl
+    目录结构:
+        日志根目录/<会话id>/conversation.jsonl   ← 对话的全部消息,一行一条
+
+    一般不需要直接用 Log,用 LogManager 即可:
+        manager = LogManager.load(目录, create=True)
+        manager.append(Message("user", "你好"))   # 追加并立即写盘
+        for msg in manager.messages: ...
     """
 
     def __init__(self, log: Log, logdir: Path) -> None:
+        """保存内部 Log 和会话目录。一般用 load() 创建,不直接构造。"""
         self._log = log
         self.logdir = logdir
 
     @property
     def log(self) -> Log:
+        """内部的 Log 对象(需要游标等底层能力时才用它)。"""
         return self._log
 
     @property
     def messages(self) -> Sequence[Message]:
+        """所有消息的列表副本。"""
         return self._log.messages
 
     def __len__(self) -> int:
+        """消息条数:len(manager)。"""
         return len(self._log)
 
     def __iter__(self) -> Iterator[Message]:
+        """让 manager 可以被 for 循环。"""
         return iter(self._log)
 
     @property
     def conversation_file(self) -> Path:
+        """本会话的日志文件完整路径。"""
         return self.logdir / CONVERSATION_FILENAME
 
     @classmethod
@@ -246,7 +283,12 @@ class LogManager:
         *,
         create: bool = False,
     ) -> LogManager:
-        """装载会话;create=True 时允许新建空会话目录。"""
+        """打开一个会话;目录不存在时,只有 create=True 才允许新建。
+
+        示例:
+            manager = LogManager.load(日志根 / "2026-0929-a3f1c2")          # 恢复旧会话
+            manager = LogManager.load(新目录, 初始消息, create=True)         # 新会话
+        """
         conversation_file = logdir / CONVERSATION_FILENAME
         if conversation_file.exists():
             log = Log.read_jsonl(conversation_file)
@@ -258,13 +300,13 @@ class LogManager:
         return cls(log, logdir)
 
     def append(self, msg: Message, *, sync: bool = False) -> None:
-        """追加一条消息并立即落盘。
+        """追加一条消息并立即写盘。
 
-        打印钩子(quiet 语义的消费者)留待 CLI 阶段接入。
+        sync=True 时额外强制刷盘,用于会话结束等关键时刻(平时不用)。
         """
         self._log.append(msg)
         self.write(sync=sync)
 
     def write(self, *, sync: bool = False) -> None:
-        """把当前日志写盘(Log 内部自行决定增量/全量路径)。"""
+        """把当前消息写盘(追加还是重写,Log 内部自己判断)。"""
         self._log.write_jsonl(self.conversation_file, sync=sync)

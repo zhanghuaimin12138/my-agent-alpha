@@ -1,7 +1,10 @@
-"""进程内上下文(ContextVar)。
+"""进程内的全局上下文:当前工作区目录和会话目录。
 
-仿 gptme 的 "ContextVar-everything":工具执行时不传 workspace/logdir 参数,
-而是从上下文取 —— 将来子代理线程 / server 多会话天然隔离。
+为什么不通过参数一层层传给工具?因为工具的执行函数签名是统一的
+(code, args, kwargs),没有位置放 workspace。这里用 ContextVar 存"当前的环境",
+工具执行时自己来取 —— 类似"当前登录用户是谁"这种贯穿全局的信息。
+
+ContextVar 的额外好处:将来开多线程跑多个会话时,各线程各有一份,互不干扰。
 """
 
 from __future__ import annotations
@@ -16,26 +19,33 @@ _logdir_var: ContextVar[Path | None] = ContextVar("alpha_logdir", default=None)
 
 
 def get_workspace() -> Path:
-    """当前工作区(agent 的 shell 在这里执行);未设置时回退 cwd。"""
+    """返回当前工作区(agent 的 shell 命令在这里执行);没设置过就用当前目录。"""
     return _workspace_var.get() or Path.cwd()
 
 
 def set_workspace(path: Path) -> None:
+    """设置当前工作区。"""
     _workspace_var.set(path)
 
 
 def get_logdir() -> Path | None:
-    """当前会话目录(工具全量输出等副产物存放处);未设置时为 None。"""
+    """返回当前会话目录(工具用它存放全量输出等文件);没设置过返回 None。"""
     return _logdir_var.get()
 
 
 def set_logdir(path: Path | None) -> None:
+    """设置当前会话目录。"""
     _logdir_var.set(path)
 
 
 @contextmanager
 def agent_context(workspace: Path, logdir: Path | None) -> Iterator[None]:
-    """一把设置两个上下文,会话结束时还原。"""
+    """临时设置工作区和会话目录,离开 with 块后自动恢复原值。
+
+    用法:
+        with agent_context(工作区, 会话目录):
+            ...  # 这段代码里工具取到的就是这两个目录
+    """
     ws_token = _workspace_var.set(workspace)
     ld_token = _logdir_var.set(logdir)
     try:
