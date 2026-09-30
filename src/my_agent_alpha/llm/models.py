@@ -1,8 +1,9 @@
-"""模型与 provider 解析(最小版)。
+"""模型名解析:把 "deepseek/deepseek-chat" 这样的名字拆成"哪家服务商 + 什么模型"。
 
-模型名约定仿 gptme:"provider/model",如 "deepseek/deepseek-chat"、
-"mock/echo"。裸名(不含 /)按 openai 处理。
-阶段 1 只需 provider 路由 + 默认模型;上下文窗口/价格/能力标志在阶段 2-3 扩充。
+模型名的写法约定(仿 gptme):斜杠前是服务商(provider),斜杠后是模型名,
+例如 "deepseek/deepseek-chat"、"mock/echo"。只写服务商名就用它的默认模型。
+
+阶段 1 只需要这些;上下文窗口大小、价格等模型属性以后再补。
 """
 
 from __future__ import annotations
@@ -12,12 +13,15 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ProviderCfg:
+    """一家服务商的连接配置。"""
+
     name: str
-    base_url: str | None  # None = 各 SDK 默认(openai 官方)
-    api_key_env: str | None  # None = 无需密钥(本机服务)
-    default_model: str | None  # 只写 provider 不写模型时的默认模型
+    base_url: str | None  # 接口地址;None = 用 SDK 自带的官方地址(openai)
+    api_key_env: str | None  # 密钥放在哪个环境变量里;None = 不需要密钥(本机服务)
+    default_model: str | None  # 只写服务商名不写模型时,默认用哪个模型
 
 
+# 内置支持的服务商表(都能用 openai 这一个 SDK 访问)
 PROVIDERS: dict[str, ProviderCfg] = {
     "mock": ProviderCfg("mock", None, None, "echo"),
     "openai": ProviderCfg("openai", None, "OPENAI_API_KEY", "gpt-4o-mini"),
@@ -31,7 +35,12 @@ PROVIDERS: dict[str, ProviderCfg] = {
         "dashscope",
         "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "DASHSCOPE_API_KEY",
-        "qwen-plus",
+        "qwen3.8-flash",
+    ),
+    # 智谱 GLM:标准按量计费端点 + Coding Plan 订阅端点,共用一把密钥
+    "glm": ProviderCfg("glm", "https://open.bigmodel.cn/api/paas/v4", "GLM_API_KEY", "glm-5.3"),
+    "glm-coding": ProviderCfg(
+        "glm-coding", "https://open.bigmodel.cn/api/coding/paas/v4", "GLM_API_KEY", "glm-5.3"
     ),
     "openrouter": ProviderCfg(
         "openrouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", None
@@ -44,24 +53,32 @@ DEFAULT_PROVIDER = "openai"
 
 @dataclass(frozen=True)
 class ModelMeta:
+    """解析结果:服务商名 + 模型名。"""
+
     provider: str
     model: str
-    context: int = 128_000  # 阶段 1 未做 token 计数,仅占位
+    context: int = 128_000  # 模型上下文窗口大小(占位,阶段 6 做长度控制时真正用上)
 
     @property
     def full(self) -> str:
+        """完整的"服务商/模型"写法,如 "deepseek/deepseek-chat"。"""
         return f"{self.provider}/{self.model}"
 
 
 def resolve_model(model: str) -> ModelMeta:
-    """解析模型名。
+    """解析模型名,返回(服务商, 模型)。
 
-    - "provider/model":显式指定;
-    - 裸名是已知 provider(如 "deepseek"):用该 provider 的默认模型;
-    - 空名:回退离线 mock(防止误打到真实计费端点);
-    - 其他裸名:按 DEFAULT_PROVIDER 处理,名字原样当模型名。
-    对"未知模型名"宽容(原样透传),但对"没给名字"明确报错 ——
-    编造一个远端不存在的模型名只会换来更迷惑的 404。
+    规则,按顺序:
+    - 空字符串 → 用 mock/echo(防止不小心打到要花钱的真实接口);
+    - 带 "/",如 "deepseek/chat" → 按写的拆;
+    - 恰好是个服务商名,如 "deepseek" → 该服务商的默认模型;
+      没有默认模型的服务商(如 openrouter)会明确报错,而不是瞎编一个名字;
+    - 其他裸名,如 "gpt-4o-mini" → 当作 openai 的模型。
+
+    示例:
+        resolve_model("deepseek/deepseek-chat") → provider="deepseek"
+        resolve_model("deepseek")               → provider="deepseek", model="deepseek-chat"
+        resolve_model("")                       → provider="mock"
     """
     if not model.strip():
         return ModelMeta(provider="mock", model="echo")
@@ -72,7 +89,7 @@ def resolve_model(model: str) -> ModelMeta:
     else:
         provider_name, model_name = DEFAULT_PROVIDER, model
     if provider_name not in PROVIDERS:
-        # 未知 provider:当作 openai 兼容的自定义网关,名字原样保留
+        # 不认识的服务商:当作自定义网关保留原名(配置方式见 llm._custom_cfg)
         return ModelMeta(provider=provider_name, model=model_name)
     cfg = PROVIDERS[provider_name]
     if not model_name:
