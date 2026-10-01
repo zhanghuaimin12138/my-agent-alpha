@@ -80,12 +80,12 @@ def execute_msg(msg: Message) -> list[Message]:
       编号只能盖一个)。
     """
     results: list[Message] = []
-    tooluses = list(ToolUse.iter_from_content(msg.content)) # 从一条assitant消息解析出list[tooluse]
-    for i, tooluse in enumerate(tooluses):# 遍历list[tooluse]
+    tooluses = list(ToolUse.iter_from_content(msg.content))  # 从一条assitant消息解析出list[tooluse]
+    for i, tooluse in enumerate(tooluses):  # 遍历list[tooluse]
         if not tooluse.is_runnable:
             continue
         try:
-            executed = list(tooluse.execute()) # 得到一个tooluse的执行结果msg/list[msg]
+            executed = list(tooluse.execute())  # 得到一个tooluse的执行结果msg/list[msg]
         except KeyboardInterrupt:
             results.append(
                 Message("system", f"{INTERRUPT_CONTENT} 工具 {tooluse.tool.name} 被中断,未执行")
@@ -97,7 +97,7 @@ def execute_msg(msg: Message) -> list[Message]:
         if tooluse.call_id and executed:
             # 如果这个tooluse有call_id并且有执行结果，那就把call_id写在最后一条msg上
             # 原生工具调用有一条铁律:一个 call_id ←必须恰好配→ 一条 tool 角色的结果消息
-            
+
             # 把 call_id 盖在最后一条结果上(消息不可变,用 replace 造新的)
             executed[-1] = replace(executed[-1], call_id=tooluse.call_id)
         results.extend(executed)

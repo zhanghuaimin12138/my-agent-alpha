@@ -24,13 +24,26 @@ import os
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
+from my_agent_alpha.confirm import (
+    ConfirmationResult,
+    clear_confirm_hooks,
+    is_auto_confirm,
+    register_confirm_hook,
+    set_auto_confirm,
+)
 from my_agent_alpha.context import agent_context
 from my_agent_alpha.llm import reply
 from my_agent_alpha.logmanager import LogManager
-from my_agent_alpha.message import INTERRUPT_CONTENT, LLM_REQUEST_FAILED_PREFIX, Message
+from my_agent_alpha.message import (
+    DECLINED_CONTENT,
+    INTERRUPT_CONTENT,
+    LLM_REQUEST_FAILED_PREFIX,
+    Message,
+)
 from my_agent_alpha.prompts import get_prompt
 from my_agent_alpha.tools import execute_msg, get_tools
 from my_agent_alpha.tools.base import ToolUse
+from my_agent_alpha.tools.shell_safety import guardrail_hook, readonly_hook
 
 MAX_STEPS = int(os.environ.get("ALPHA_MAX_STEPS", "50"))
 
@@ -61,7 +74,7 @@ def step(
         yield 工具输出("$ ls\na.txt\nReturnCode: 0")
     """
     msgs = prepare_messages(log_messages)
-    tools = get_tools() if tool_format == "tool" else () # 如果支持原生调用需要拿到list[toolSpec]
+    tools = get_tools() if tool_format == "tool" else ()  # 如果支持原生调用需要拿到list[toolSpec]
     msg_response = reply(msgs, model, on_token=on_token, tools=tools, tool_format=tool_format)
     yield msg_response
     yield from execute_msg(msg_response)
@@ -179,6 +192,7 @@ def _process_message_conversation(
     while True:
         printer = _StreamPrinter()
         interrupted = False
+        declined = False
         for msg in step(manager.messages, model, on_token=printer.token, tool_format=tool_format):
             manager.append(msg)
             if msg.role == "assistant":
@@ -189,16 +203,84 @@ def _process_message_conversation(
                 _print_message(msg)
             if msg.role == "system" and msg.content.startswith(INTERRUPT_CONTENT):
                 interrupted = True
+            if msg.role == "system" and msg.content.startswith(DECLINED_CONTENT):
+                declined = True
         steps += 1
         if interrupted:
             manager.append(Message("system", INTERRUPT_CONTENT, quiet=True))
             print("\n(已中断,回到提示符)")
             return  # 停止本 turn,回到提示符
+        if declined:
+            print("\n(已拒绝执行,本回合结束;可换个说法让模型重来)")
+            return  # 用户拒绝了工具:停止本回合(仿 gptme 的 DECLINED 语义)
         if steps >= MAX_STEPS:
             manager.append(Message("system", f"已达到单 turn 最大步数({MAX_STEPS}),停止。"))
             return
         if not has_runnable_tooluse(manager.messages):
             return
+
+
+# ---- 确认链:终端里问用户 ----
+
+
+def _preview(tooluse: ToolUse) -> str:
+    """生成给用户看的"这次要执行什么"预览。
+
+    示例:shell 调用 → "shell: command=ls -la";
+    save 调用 → "save a.txt" + 内容前几行。
+    """
+    if tooluse.tool.name in ("save", "append") and tooluse.content is not None:
+        path = (
+            (tooluse.args or ["?"])[0] if tooluse.args else (tooluse.kwargs or {}).get("path", "?")
+        )
+        lines = tooluse.content.split("\n")
+        head = "\n".join(lines[:5])
+        more = "\n…" if len(lines) > 5 else ""
+        return f"{tooluse.tool.name} {path}\n{head}{more}"
+    return tooluse.display_command()
+
+
+def cli_confirm_hook(tooluse: ToolUse) -> ConfirmationResult | None:
+    """优先级 0 的终端询问:打印预览,问用户 y/n/e/a(只在交互模式注册)。
+
+    y 或回车 → 放行;n → 跳过;e → 用户输入改写后的内容再执行;
+    a → 本会话后续都不再问。输入结束(Ctrl-D)按跳过处理(安全方向)。
+    """
+    if is_auto_confirm():
+        return None  # 用户已选"全部放行":本钩子退位,链尾自动放行
+    print(f"\n┌─ 需要确认:{tooluse.tool.name} ─────────────")
+    print(f"│ {_preview(tooluse)}")
+    while True:
+        try:
+            answer = input("└─ 执行?[y]是 / n 跳过 / e 改写 / a 全部放行: ").strip().lower()
+        except EOFError:
+            return ConfirmationResult("skip", message="输入结束,按跳过处理")
+        if answer in ("y", ""):
+            return ConfirmationResult("confirm")
+        if answer == "n":
+            return ConfirmationResult("skip", message="用户选择跳过")
+        if answer == "a":
+            set_auto_confirm(True)
+            return ConfirmationResult("confirm")
+        if answer == "e":
+            edited = input("  改写为: ")
+            if edited.strip():
+                return ConfirmationResult("edit", edited_content=edited)
+
+
+def _setup_confirm_hooks(interactive: bool, yes: bool) -> None:
+    """会话开始时装配确认链(每次重建,防止上个会话残留)。
+
+    - 安全护栏(200):永远注册 —— 灾难命令连 -y 也不放行;
+    - 只读放行(10):永远注册 —— ls/grep 不用烦用户;
+    - 终端询问(0):只在交互模式且没开 -y 时注册 ——
+      非交互(脚本/测试)和 -y 走到链尾自动放行(自主模式)。
+    """
+    clear_confirm_hooks()
+    register_confirm_hook("guardrail", guardrail_hook, priority=200)
+    register_confirm_hook("readonly", readonly_hook, priority=10)
+    if interactive and not yes:
+        register_confirm_hook("cli", cli_confirm_hook, priority=0)
 
 
 # ---- 外层:和用户来回对话的主循环 ----
@@ -304,6 +386,7 @@ def chat(
     *,
     non_interactive: bool = False,
     tool_format: str = "markdown",
+    yes: bool = False,
 ) -> LogManager:
     """会话入口:准备会话 → 进入对话循环 → 返回会话管理器。
 
@@ -311,11 +394,13 @@ def chat(
     - 旧会话:重新打开,把历史消息打印一遍,接着聊;
     - prompts:开场就要发送的输入(命令行传进来的);non_interactive
       见 _run_chat_loop 的说明;
-    - tool_format:"markdown" 或 "tool"(原生工具调用)。
+    - tool_format:"markdown" 或 "tool"(原生工具调用);
+    - yes=True 相当于 -y:交互模式也不问确认(安全护栏仍然生效)。
 
     返回 LogManager,测试用它检查日志内容;正常调用可以忽略返回值。
     """
     tools = get_tools()
+    _setup_confirm_hooks(interactive=not non_interactive, yes=yes)
     manager = LogManager.load(logdir, create=True)
     if len(manager) == 0:
         for msg in get_prompt(

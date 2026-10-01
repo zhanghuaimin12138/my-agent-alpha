@@ -33,7 +33,7 @@ uv run my-agent-alpha  # 控制台入口(阶段 0 占位)
 | 1 | 脊柱:step() + markdown 工具解析 + 三层循环 CLI | ✅ |
 | 2 | 流式生成 + 流中工具检测(break_on_tooluse)+ 重试策略 | ✅ |
 | 3 | 原生工具调用(call_id 配对、JSON Schema、双格式共用执行端) | ✅ |
-| 4 | 确认链与 shell 安全梯 | |
+| 4 | 确认链(y/n/e/a 终端询问、只读放行、灾难硬拦、-y 自主模式) | ✅ |
 | 5 | Hook 体系 / slash 命令 / 分层配置 | |
 | 6 | 上下文压缩 | |
 | 7 | HTTP Server(SSE)+ WebUI | |

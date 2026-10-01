@@ -52,6 +52,7 @@ def main(argv: list[str] | None = None) -> None:
         default=os.environ.get("ALPHA_TOOL_FORMAT", "markdown"),
         help="工具调用通道:markdown(围栏代码块)或 tool(原生 function calling)",
     )
+    parser.add_argument("-y", "--yes", action="store_true", help="全部自动确认(安全护栏仍然生效)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args(argv)
 
@@ -70,6 +71,7 @@ def main(argv: list[str] | None = None) -> None:
             model=args.model,
             non_interactive=non_interactive,
             tool_format=args.tool_format,
+            yes=args.yes,
         )
     except KeyboardInterrupt:
         sys.exit(130)

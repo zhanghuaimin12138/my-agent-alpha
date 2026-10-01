@@ -30,10 +30,10 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from my_agent_alpha.codeblock import fenced_regions, iter_from_markdown
-from my_agent_alpha.message import Message
+from my_agent_alpha.message import DECLINED_CONTENT, Message
 
 # 所有工具的执行函数长这一个样子:
 # execute(代码内容, 位置参数列表, 关键字参数字典) -> 一条消息,或者一堆消息(逐条产出)
@@ -227,6 +227,10 @@ class ToolUse:
     def execute(self) -> Iterator[Message]:
         """真正执行这次调用,逐条产出结果消息。
 
+        执行前先过确认链(见 confirm 模块):非只读工具都会被"审批"一次 ——
+        放行(confirm)才执行;拒绝(skip)产出一条带 DECLINED 标记的说明,
+        不执行;改写(edit)则把主参数换成改写后的内容再执行。
+
         工具内部出错不会炸掉程序:错误被转成一条 system 消息
         (模型看到错误信息后可以自己修正重试)。
         Ctrl-C 例外:中断必须向上传,不能被当成"工具出错"吞掉。
@@ -236,8 +240,23 @@ class ToolUse:
         真正的代码在取结果时才运行,错误也是那时才冒出来。
         """
         assert self.tool.execute is not None  # is_runnable 已保证
+        if not self.tool.read_only:
+            from my_agent_alpha.confirm import get_confirmation  # 延迟导入避免循环
+
+            decision = get_confirmation(self)
+            if decision.action == "skip":
+                reason = f":{decision.message}" if decision.message else ""
+                yield Message(
+                    "system", f"{DECLINED_CONTENT} 已跳过工具 {self.tool.name} 调用{reason}"
+                )
+                return
+            if decision.action == "edit" and decision.edited_content is not None:
+                # 改写主参数:markdown 通道换 content,原生通道换 command/content 参数
+                self = self.with_edited_content(decision.edited_content)
+        execute_fn = self.tool.execute
+        assert execute_fn is not None  # is_runnable 已保证
         try:
-            result = self.tool.execute(self.content, self.args, self.kwargs)
+            result = execute_fn(self.content, self.args, self.kwargs)
             if isinstance(result, Message):
                 yield result
             else:
@@ -246,6 +265,22 @@ class ToolUse:
             raise  # 中断必须向上传播,不被吞成错误消息
         except Exception as e:
             yield Message("system", f"工具 {self.tool.name} 执行失败: {e}")
+
+    def with_edited_content(self, edited: str) -> ToolUse:
+        """返回一个"主参数被改写"的新调用(消息不可变,造新的)。
+
+        示例:markdown 的 ```shell\necho hi\n``` 被用户编辑成 "echo hello"
+        → 新调用的 content = "echo hello";
+        原生的 {"command": "echo hi"} → kwargs["command"] = "echo hello"。
+        """
+        if self.kwargs:# 原生通道
+            new_kwargs = dict(self.kwargs)
+            for key in ("command", "content"):# command是shell的参数，content是save和append的参数
+                if key in new_kwargs:
+                    new_kwargs[key] = edited
+                    break
+            return replace(self, kwargs=new_kwargs)
+        return replace(self, content=edited)
 
     @classmethod
     def iter_from_content(cls, content: str, *, streaming: bool = False) -> Iterator[ToolUse]:
@@ -265,12 +300,12 @@ class ToolUse:
 
         found: list[ToolUse] = []
 
-        for cb in iter_from_markdown(# list[codeBlock]
+        for cb in iter_from_markdown(  # list[codeBlock]
             content, streaming=streaming
         ):  # markdown代码块解析出codeblock类
             tool = get_tool_for_langtag(cb.lang)  # 通过lang->toolSpec
             if tool is not None:
-                found.append( #得到toolUser
+                found.append(  # 得到toolUser
                     cls(
                         tool=tool,
                         args=[cb.args] if cb.args else None,

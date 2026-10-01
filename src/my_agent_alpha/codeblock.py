@@ -111,7 +111,7 @@ def fenced_regions(text: str) -> list[tuple[int, int]]:
         在围栏代码块外的，是真正的工具调用
     2.markdown格式工具调用模式:
         在围栏代码块里的是工具调用
-    
+
     没闭合的围栏也算一个区间(同样要跳过)。
 
     示例:fenced_regions("说明\\n```shell\\nls\\n```\\n后文")

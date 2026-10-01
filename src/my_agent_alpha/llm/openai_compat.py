@@ -228,7 +228,7 @@ def _stream_once(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
-    if tools: # 如果tools不为空，说明支持原生工具调用，要新增kwargs["tools"],内容是固定json scheme
+    if tools:  # 如果tools不为空，说明支持原生工具调用，要新增kwargs["tools"],内容是固定json scheme
         create_kwargs["tools"] = [spec_to_openai_tool(t) for t in tools if t.is_runnable]
     events = client.chat.completions.create(  # 正式发起http请求
         **create_kwargs
@@ -278,12 +278,11 @@ def _stream_once(
             yield delta.content
 
         # 拿toolcall碎片tc，拼成完整的工具调用
-            # 片1: index=0, id="call_1", function={name="save", arguments=""} ← 名字和编号在第一片
-            # 片2: index=0, function={arguments='{"pa'}                       ← 参数开始逐字符挤牙膏
-            # 片3: index=0, function={arguments='th": "a.t'}
-            # 片4: index=0, function={arguments='xt", "content": "hi"}'}      ← 最后一片,大括号闭合
+        # 片1: index=0, id="call_1", function={name="save", arguments=""} ← 名字和编号在第一片
+        # 片2: index=0, function={arguments='{"pa'}                       ← 参数开始逐字符挤牙膏
+        # 片3: index=0, function={arguments='th": "a.t'}
+        # 片4: index=0, function={arguments='xt", "content": "hi"}'}      ← 最后一片,大括号闭合
         for tc in getattr(delta, "tool_calls", None) or []:
-
             # acc：一个调用目前的状态
             acc = tool_acc.setdefault(tc.index, {"id": "", "name": "", "args": "", "done": ""})
             if tc.id:
@@ -297,16 +296,16 @@ def _stream_once(
             # 检查一个调用是否拼装完成(大括号配对 + 能解析)就立刻产出调用行,
             args_ready = (
                 acc["name"]
-                and not acc["done"] # 还没yield
-                and acc["args"].startswith("{") # 参数是个 JSON 对象
-                and find_json_end(acc["args"], 0) == len(acc["args"]) # 大括号恰好闭合到末尾
+                and not acc["done"]  # 还没yield
+                and acc["args"].startswith("{")  # 参数是个 JSON 对象
+                and find_json_end(acc["args"], 0) == len(acc["args"])  # 大括号恰好闭合到末尾
             )
             if args_ready:
                 try:
-                    json.loads(acc["args"]) # json解析，出错就丢
+                    json.loads(acc["args"])  # json解析，出错就丢
                 except json.JSONDecodeError:
                     continue
-                yield f"@{acc['name']}({acc['id']}): {acc['args']}\n" # yield工具调用：str()
+                yield f"@{acc['name']}({acc['id']}): {acc['args']}\n"  # yield工具调用：str()
                 acc["done"] = "1"
 
     if in_think:

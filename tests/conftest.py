@@ -32,11 +32,13 @@ def _reset_agent_state(workspace: Path, logdir: Path) -> Iterator[None]:
     测试之间的状态泄漏是最难查的一类 bug。
     """
     from my_agent_alpha import context
+    from my_agent_alpha.confirm import clear_confirm_hooks
     from my_agent_alpha.llm import mock as llm_mock
     from my_agent_alpha.tools import clear_tools
 
     llm_mock.clear_scripted()
     clear_tools()
+    clear_confirm_hooks()
     with context.agent_context(workspace, logdir):
         yield
     llm_mock.clear_scripted()

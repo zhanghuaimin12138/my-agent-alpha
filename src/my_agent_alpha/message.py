@@ -25,6 +25,7 @@ _ROLES: tuple[str, ...] = ("system", "user", "assistant")
 # (例如程序崩溃后重新打开会话,扫描日志看到 [interrupted] 就知道上个 turn 是被中断的)
 INTERRUPT_CONTENT = "[interrupted]"
 LLM_REQUEST_FAILED_PREFIX = "[LLM 请求失败]"
+DECLINED_CONTENT = "[declined]"  # 用户拒绝执行某次工具调用的标记(看到它本回合停止)
 
 
 def utcnow() -> datetime:

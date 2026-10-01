@@ -57,7 +57,7 @@ class _StreamWithMetadata:
     背景:生成器结束时可以带一个返回值,但它藏在 StopIteration 异常里,
     平时的 for 循环拿不到。这个类把值取出来存好。
     生成器结束时的返回值(usage 账单)藏在 StopIteration 异常的.value 里
-    for 循环会把它吞掉，手写 next 才有机会捕到 
+    for 循环会把它吞掉，手写 next 才有机会捕到
     _StreamWithMetadata 就是干这个的(它把 .value 存进 wrapped.metadata)
 
     它自己也是个迭代器,而且支持"中途停、之后接着读"(断点检测会用到:
@@ -98,7 +98,9 @@ def reply(
     model: str,
     *,
     on_token: OnToken | None = None,
-    break_on_tooluse: bool = True,# 被工具调用打断（实现一次step仅一个工具调用，除非模型支持并行工具调用（后续补充））
+    # 被工具调用打断:一次 step 只执行一个工具调用,
+    # 除非模型支持并行工具调用(后续补充)
+    break_on_tooluse: bool = True,
     tools: Sequence[ToolSpec] = (),
     tool_format: str = "markdown",
 ) -> Message:
@@ -118,7 +120,7 @@ def reply(
     meta = resolve_model(model)
     # 判断是否支持原生工具调用
     # 如果支持，传入参数tools应不为none（list[ToolSpec]）
-    use_native = tool_format == "tool" 
+    use_native = tool_format == "tool"
     if meta.provider == "mock":
         raw: Iterator[str] = mock_stream(messages, meta.model)
     else:
@@ -127,7 +129,7 @@ def reply(
 
     # 消费循环
     # 解析拿到的chunk(raw)
-    wrapped = _StreamWithMetadata(raw) # 包装一层，为了拿到usage
+    wrapped = _StreamWithMetadata(raw)  # 包装一层，为了拿到usage
     parts: list[str] = []  # 收到的所有文字小段（攒着，最后拼完整回复）
     interrupted = False
     broke = False
@@ -136,11 +138,12 @@ def reply(
             chunk = next(wrapped)
             parts.append(chunk)
             if on_token is not None:
-                on_token(chunk)# 终端实时打印
+                on_token(chunk)  # 终端实时打印
             # 每凑满一行检查一次(检查太频繁会拖慢,行是天然的最小单位)
-            if ( # 有可执行的工具，直接打断，不继续接收模型生成
-                # ps：有两个可执行工具怎么办？第二个工具直接打断，但是在下一轮对话ai会再次提出调用这个工具
-                # 什么时候不打断？模型支持并行工具调用的时候，可以选择不打断
+            if (  # 有可执行的工具,直接打断,不继续接收模型生成
+                # ps:有两个可执行工具怎么办?第二个直接打断,
+                # 但下一轮对话模型会再次提出调用这个工具(基于第一轮的真实结果)
+                # 什么时候不打断?模型支持并行工具调用的时候,可以选择不打断
                 break_on_tooluse
                 and "\n" in chunk
                 and _has_complete_runnable_tooluse("".join(parts))
@@ -156,11 +159,11 @@ def reply(
         # 把剩余的生成内容读完(内容直接丢弃，但是生成内容的结尾有usage，需要拿到)
         try:
             while True:
-                next(wrapped) # 在Generator的最后拿到返回值usage
+                next(wrapped)  # 在Generator的最后拿到返回值usage
         except StopIteration:
             pass
 
-    text = "".join(parts) # 攒起来的内容放进content（text）里
+    text = "".join(parts)  # 攒起来的内容放进content（text）里
     if interrupted:
         text += _INTERRUPT_MARKER
     metadata: dict[str, object] = {"model": meta.full}
