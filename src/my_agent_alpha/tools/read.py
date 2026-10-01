@@ -18,7 +18,7 @@ from pathlib import Path
 
 from my_agent_alpha.context import get_workspace
 from my_agent_alpha.message import Message
-from my_agent_alpha.tools.base import ToolSpec
+from my_agent_alpha.tools.base import Parameter, ToolSpec
 
 _MAX_CHARS = 200_000  # 阶段 6 之前先用朴素字符上限兜底
 
@@ -49,13 +49,21 @@ def _read_one(path: Path) -> str:
 def execute_read(
     code: str | None, args: list[str] | None, kwargs: dict[str, str] | None
 ) -> Iterator[Message]:
-    """路径来源:fence 头参数(单文件)+ 代码块每行一个路径;相对路径相对工作区。"""
-    assert code is not None
+    """读取文件,输出带行号的内容。
+
+    路径来源(三种,汇总去执行):
+    - markdown 通道:fence 头参数(单文件)+ 代码块每行一个路径;
+    - 原生通道:kwargs 的 path 参数(单文件)。
+    相对路径相对工作区。
+    """
     workspace = get_workspace()
     paths = list(args or [])
-    paths += [line.strip() for line in code.split("\n") if line.strip()]
+    if kwargs and kwargs.get("path"):
+        paths.append(kwargs["path"])
+    if code:
+        paths += [line.strip() for line in code.split("\n") if line.strip()]
     if not paths:
-        yield Message("system", "错误: read 没有给出任何路径(fence 头或代码块内)")
+        yield Message("system", "错误: read 没有给出任何路径(fence 头、代码块或 path 参数)")
         return
     results = [_read_one((workspace / p) if not Path(p).is_absolute() else Path(p)) for p in paths]
     yield Message("system", "\n\n".join(results))
@@ -67,6 +75,7 @@ tool = ToolSpec(
     instructions="代码块里每行一个路径;相对路径相对当前工作区。",
     examples="```read\nsrc/main.py\npyproject.toml\n```",
     block_types=("read",),
+    parameters=(Parameter("path", "string", "要读取的文件路径"),),
     read_only=True,
     execute=execute_read,
 )

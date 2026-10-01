@@ -1,37 +1,108 @@
 """工具系统的两个核心类:ToolSpec(工具是什么)和 ToolUse(一次调用)。
 
-模型怎么"调用工具"?靠约定:它在回复里写一个 markdown 代码块,
+模型怎么"调用工具"?有两种通道(见 docs/learn/01 学习文档 §2.4):
+
+通道一(markdown 约定,阶段 1 起):模型在回复里写代码块,
 
     ```shell
     ls -la
     ```
 
-代码块的语言标记就是工具名,块内就是执行内容;块头还可以带参数,
+代码块的语言标记就是工具名,块内是执行内容;块头还可以带参数,
 如 ```save path/to/file``` 中 path/to/file 是保存路径。
 
-- ToolSpec:一个工具的"说明书"(名字、用法、示例、执行函数)。
-  同一份说明书有三个用途:拼进系统提示词教模型怎么用、
-  用来识别回复里的代码块是不是工具调用、提供执行函数;
-- ToolUse:从模型回复里解析出来的一次具体调用(哪个工具 + 什么内容)。
+通道二(原生工具调用,本阶段新增):模型走接口内置的 function calling,
+我们在日志里把它记成一行文本(这样日志还是纯文本、人和解析器都好处理):
 
-阶段 1 刻意省略:参数类型表 Parameter、模型原生的 JSON 工具调用(阶段 3)、
-hooks 和确认机制(阶段 4)、工具开关列表。
+    @save(call_abc123): {"path": "a.txt", "content": "你好"}
+
+两种通道解析出来都是 ToolUse,执行的是同一个函数 —— 工具的"执行端"
+(save.py 这些)完全不用关心自己是被哪种通道调用的。
+
+- ToolSpec:一个工具的"说明书"(名字、用法、示例、参数表、执行函数);
+- ToolUse:从模型回复里解析出来的一次具体调用。
+
+阶段 3 刻意省略:hooks 和确认机制(阶段 4)、工具开关列表。
 """
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 
-from my_agent_alpha.codeblock import iter_from_markdown
+from my_agent_alpha.codeblock import fenced_regions, iter_from_markdown
 from my_agent_alpha.message import Message
 
 # 所有工具的执行函数长这一个样子:
 # execute(代码内容, 位置参数列表, 关键字参数字典) -> 一条消息,或者一堆消息(逐条产出)
+# 两种通道在这里汇合:markdown 调用给 code/args,原生调用给 kwargs(解析好的参数字典)
 ExecuteFunc = Callable[
     [str | None, list[str] | None, dict[str, str] | None],
     "Message | Iterator[Message]",
 ]
+
+
+@dataclass(frozen=True)
+class Parameter:
+    """工具的一个参数声明(给原生工具调用生成 JSON Schema 用)。
+
+    示例:Parameter("path", "string", "要保存的文件路径") 表示
+    "名为 path 的字符串参数,必填"。
+    """
+
+    name: str
+    type: str = "string"  # JSON Schema 的类型:string / integer / number / boolean / array
+    description: str = ""
+    required: bool = True
+
+
+def parameters_to_schema(params: Sequence[Parameter]) -> dict[str, object]:
+    """把参数表转成接口要求的 JSON Schema(原生工具调用的"参数说明书")。
+
+    示例:两个参数 (path, content) 转成
+    {"type": "object",
+     "properties": {"path": {"type": "string", "description": ...},
+                    "content": {"type": "string", ...}},
+     "required": ["path", "content"],
+     "additionalProperties": False}
+    """
+    properties: dict[str, object] = {}
+    for p in params:
+        prop: dict[str, object] = {"type": p.type}
+        if p.description:
+            prop["description"] = p.description
+        properties[p.name] = prop
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": [p.name for p in params if p.required],
+        "additionalProperties": False,
+    }
+
+
+def spec_to_openai_tool(spec: ToolSpec) -> dict[str, object]:
+    """把 ToolSpec 转成接口的 tools 参数格式(原生工具调用的请求端)。
+
+    示例:shell 工具转成
+    {"type": "function",
+     "function": {"name": "shell",
+                  "description": "在 bash 里执行命令……",
+                  "parameters": {"type": "object", ...}}}
+
+    说明:description 截断到 1000 字符 —— OpenAI 对函数描述有 1024 上限,
+    超长直接 400(gptme 为此专门维护"精简版说明",我们先用截断)。
+    """
+    description = f"{spec.desc}\n{spec.instructions}".strip()
+    if len(description) > 1000:
+        description = description[:1000] + "…"
+    function: dict[str, object] = {
+        "name": spec.name,
+        "description": description,
+        "parameters": parameters_to_schema(spec.parameters),
+    }
+    return {"type": "function", "function": function}
 
 
 # 工具规格说明书
@@ -40,7 +111,8 @@ class ToolSpec:
     """一个工具的声明。示例见 tools/shell.py 末尾的 tool = ToolSpec(...)。
 
     block_types 最关键:列出"哪些语言标记代表我",如 ("shell", "sh", "bash")。
-    模型回复里的代码块语言标记命中这里,这个块就是对我的调用。
+    模型回复里的代码块语言标记命中这里,这个块就是对我的调用(markdown 通道)。
+    parameters 是参数表,给原生工具调用生成 JSON Schema 用(两种通道共用一份声明)。
     """
 
     name: str
@@ -48,6 +120,7 @@ class ToolSpec:
     instructions: str = ""
     examples: str = ""
     block_types: tuple[str, ...] = ()  # markdown fence 语言标记 ↔ 本工具
+    parameters: tuple[Parameter, ...] = ()  # 参数表(原生工具调用用)
     read_only: bool = False
     execute: ExecuteFunc | None = None
     _sort_key: tuple[int, str] = field(default=(50, ""), compare=False)
@@ -77,25 +150,79 @@ class ToolSpec:
         return "\n\n".join(p for p in parts if p)
 
 
+# 匹配原生调用行的开头,如 "@save(call_abc123):"
+_NATIVE_CALL_RE = re.compile(r"@([A-Za-z0-9_.\-]+)\(([A-Za-z0-9_\-]*)\)\s*:")
+
+
+def find_json_end(text: str, brace_start: int) -> int:
+    """从左大括号的位置开始,数配对的大括号,返回右大括号后面一格的位置。
+
+    引号里的大括号不算(否则 "{"path": "}"} 会被数错)。
+    找不到配对的右括号返回 -1(说明 JSON 还没写完,流式中间态)。
+
+    示例:find_json_end('x {"a": 1} y', 2) → 9(指向 '}' 的下一格)
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(brace_start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
 @dataclass(frozen=True)
 class ToolUse:
     """模型回复里解析出来的一次工具调用。
 
-    示例:回复 "我来:\n```save a.txt\n你好\n```" 解析出
-    tool=save 工具、args=["a.txt"]、content="你好"。
+    两种通道解析的结果:
+    - markdown:回复 "我来:\n```save a.txt\n你好\n```" 解析出
+      tool=save 工具、args=["a.txt"]、content="你好"、kwargs=None;
+    - 原生:回复里的 "@save(call_abc): {\\"path\\": \\"a.txt\\", ...}" 行解析出
+      tool=save 工具、kwargs={"path": "a.txt", ...}、call_id="call_abc"、content=None。
+
     start 是这次调用在回复原文里的位置(多个调用按它排序)。
     """
 
     tool: ToolSpec
     args: list[str] | None
     content: str | None
-    call_id: str | None = None  # 阶段 3 原生工具调用配对用,本阶段恒为 None
+    kwargs: dict[str, str] | None = None  # 原生调用的参数(已解析成字典)
+    call_id: str | None = None  # 原生调用的编号,执行结果要带着它配对回去
     start: int = 0  # 为其在 assistant 文本中的字符偏移
 
     @property
     def is_runnable(self) -> bool:
         """这次调用的工具能不能真的执行。"""
         return self.tool.is_runnable
+
+    def display_command(self) -> str:
+        """给人看的"这次调用要干什么",打印和测试断言用。
+
+        示例:markdown 的 shell 调用 → "shell: ls -la";
+        原生的 save 调用 → "save: path=a.txt"
+        """
+        if self.kwargs:
+            kv = " ".join(f"{k}={v}" for k, v in self.kwargs.items())
+            return f"{self.tool.name}: {kv}"
+        if self.args:
+            return f"{self.tool.name}: {' '.join(self.args)} {self.content or ''}".strip()
+        return f"{self.tool.name}: {self.content or ''}"
 
     def execute(self) -> Iterator[Message]:
         """真正执行这次调用,逐条产出结果消息。
@@ -110,7 +237,7 @@ class ToolUse:
         """
         assert self.tool.execute is not None  # is_runnable 已保证
         try:
-            result = self.tool.execute(self.content, self.args, None)
+            result = self.tool.execute(self.content, self.args, self.kwargs)
             if isinstance(result, Message):
                 yield result
             else:
@@ -122,29 +249,69 @@ class ToolUse:
 
     @classmethod
     def iter_from_content(cls, content: str, *, streaming: bool = False) -> Iterator[ToolUse]:
-        """从模型回复文本里按顺序解析出所有工具调用。
+        """从模型回复文本里按出现顺序解析出所有工具调用(两种通道都认)。
 
         示例:list(ToolUse.iter_from_content("```shell\\nls\\n```"))
         → [ToolUse(tool=shell工具, args=None, content="ls")]
 
-        - 语言标记不认识任何工具的代码块(比如模型写的普通 ```python 示例)
-          直接忽略 —— 那不是工具调用;
+        - markdown 通道:语言标记不认识任何工具的代码块直接忽略;
+        - 原生通道:@工具名(编号): {参数} 行,参数 JSON 没闭合就先忽略
+          (流式生成到一半是正常现象,这本身就是"流式安全"的);
+          围栏代码块里面写的 @xxx 只是示例,不算调用;
         - streaming=True 只在流式检查时使用:代码块的 ``` 闭合后还要
           跟一个空行才算数(更严,防止执行半截命令),详见 codeblock 模块说明。
         """
-        from my_agent_alpha.tools import get_tool_for_langtag  # 延迟导入避免循环依赖
+        from my_agent_alpha.tools import get_tool, get_tool_for_langtag  # 延迟导入避免循环依赖
 
-        for cb in iter_from_markdown(
+        found: list[ToolUse] = []
+
+        for cb in iter_from_markdown(# list[codeBlock]
             content, streaming=streaming
         ):  # markdown代码块解析出codeblock类
             tool = get_tool_for_langtag(cb.lang)  # 通过lang->toolSpec
             if tool is not None:
-                yield cls(
-                    tool=tool,
-                    args=[cb.args] if cb.args else None,
-                    content=cb.content,
-                    start=cb.start,
+                found.append( #得到toolUser
+                    cls(
+                        tool=tool,
+                        args=[cb.args] if cb.args else None,
+                        content=cb.content,
+                        start=cb.start,
+                    )
                 )
+
+        regions = fenced_regions(content)  # 围栏内的 @xxx 是示例,跳过
+        for match in _NATIVE_CALL_RE.finditer(content):
+            if any(a <= match.start() < b for a, b in regions):
+                continue
+            # 冒号后面应该紧跟一个 {,开始数配对大括号
+            brace = match.end()
+            while brace < len(content) and content[brace] in " \t":
+                brace += 1
+            if brace >= len(content) or content[brace] != "{":
+                continue
+            end = find_json_end(content, brace)
+            if end < 0:
+                continue  # JSON 没闭合:还没写完,先不要
+            try:
+                kwargs = json.loads(content[brace:end])
+            except json.JSONDecodeError:
+                continue  # JSON 坏了:不是有效调用,跳过
+            if not isinstance(kwargs, dict):
+                continue
+            tool = get_tool(match.group(1))  # 原生通道按工具名查找
+            if tool is not None:
+                found.append(
+                    cls(
+                        tool=tool,
+                        args=None,
+                        content=None,
+                        kwargs=kwargs,
+                        call_id=match.group(2) or None,
+                        start=match.start(),
+                    )
+                )
+
+        yield from sorted(found, key=lambda u: u.start)  # 按出现位置排序
 
 
 def parse_tooluses(content: str) -> list[ToolUse]:

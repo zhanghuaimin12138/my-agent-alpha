@@ -17,7 +17,7 @@ from datetime import datetime
 from my_agent_alpha.message import Message, utcnow
 from my_agent_alpha.tools.base import ToolSpec
 
-# 静态提示词正文:告诉模型它是谁、怎么调用工具(这是模型学会用工具的唯一途径)
+# 静态提示词正文(markdown 通道):告诉模型它是谁、怎么用围栏代码块调工具
 _IDENTITY = """\
 # 身份
 
@@ -44,17 +44,41 @@ ls -la
 5. 多步任务一步步来:每一步等结果、看结果、再走下一步。不要臆测工具输出。
 """
 
+# 静态提示词正文(原生通道):工具走接口的 function calling,
+# 不用教围栏约定,只说明结果怎么回来
+_IDENTITY_NATIVE = """\
+# 身份
 
-def get_prompt(tools: Sequence[ToolSpec], *, now: datetime | None = None) -> list[Message]:
+你是 my-agent-alpha,一个运行在用户终端里的个人 AI 助手。
+你可以通过函数调用(function calling)使用下面列出的工具。
+
+# 工具使用须知
+
+1. 需要执行操作时,发起对应的函数调用;调用后等待结果
+   (以 system 消息返回),再根据结果决定下一步。
+2. 任务完成(或无需工具)时,用自然语言直接回答。
+3. 多步任务一步步来:每一步等结果、看结果、再走下一步。不要臆测工具输出。
+
+# 可用工具(参数说明见函数定义)
+"""
+
+
+def get_prompt(
+    tools: Sequence[ToolSpec], *, now: datetime | None = None, native: bool = False
+) -> list[Message]:
     """生成会话开头的系统提示词消息(两条),调用方把它们写进日志一次即可。
+
+    native=True 用原生工具调用版说明(围栏约定不用教,参数说明在函数定义里);
+    False 用 markdown 版(教模型写围栏代码块)。
 
     示例:返回
     [Message("system", 身份+工具文档, pinned=True, hide=True),
      Message("system", "# 当前时间\\n2026-09-29 10:00:00 UTC", pinned=True, hide=True)]
     """
     tool_docs = "\n\n---\n\n".join(t.get_tool_prompt() for t in tools)
-    parts = [_IDENTITY]
-    if tool_docs:
+    identity = _IDENTITY_NATIVE if native else _IDENTITY
+    parts = [identity]
+    if tool_docs and not native:
         parts.append("# 可用工具\n\n" + tool_docs)
     static = Message("system", "\n\n".join(parts), pinned=True, hide=True)
 

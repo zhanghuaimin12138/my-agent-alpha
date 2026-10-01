@@ -41,7 +41,10 @@ _COMMANDS = {"exit", "quit", "help"}
 
 
 def step(
-    log_messages: Sequence[Message], model: str, on_token: Callable[[str], None] | None = None
+    log_messages: Sequence[Message],
+    model: str,
+    on_token: Callable[[str], None] | None = None,
+    tool_format: str = "markdown",
 ) -> Iterator[Message]:
     """执行一轮:把对话发给模型,产出模型回复,再产出工具执行结果。
 
@@ -50,13 +53,16 @@ def step(
 
     on_token:模型每生成一小段文字就调用一次这个函数(终端实时显示用;
     传 None 就不显示)。检测到完整工具调用时提前停止生成,逻辑在 reply() 里。
+    tool_format:"markdown"(默认,围栏代码块约定)或 "tool"(原生工具调用,
+    工具表会随请求发给接口)。两种方式执行的还是同一批工具函数。
 
     示例(一轮里通常发生的事):
         yield 模型回复("我来执行:\n```shell\nls\n```")
         yield 工具输出("$ ls\na.txt\nReturnCode: 0")
     """
     msgs = prepare_messages(log_messages)
-    msg_response = reply(msgs, model, on_token=on_token)
+    tools = get_tools() if tool_format == "tool" else () # 如果支持原生调用需要拿到list[toolSpec]
+    msg_response = reply(msgs, model, on_token=on_token, tools=tools, tool_format=tool_format)
     yield msg_response
     yield from execute_msg(msg_response)
 
@@ -158,7 +164,9 @@ class _StreamPrinter:
         return len(buf)
 
 
-def _process_message_conversation(manager: LogManager, model: str) -> None:
+def _process_message_conversation(
+    manager: LogManager, model: str, tool_format: str = "markdown"
+) -> None:
     """处理一条用户输入:反复执行 step(),直到模型不再要工具或步数到上限。
 
     每拿到一条消息就立刻写进日志(而不是攒到最后一起写):
@@ -171,7 +179,7 @@ def _process_message_conversation(manager: LogManager, model: str) -> None:
     while True:
         printer = _StreamPrinter()
         interrupted = False
-        for msg in step(manager.messages, model, on_token=printer.token):
+        for msg in step(manager.messages, model, on_token=printer.token, tool_format=tool_format):
             manager.append(msg)
             if msg.role == "assistant":
                 printer.finish()
@@ -252,6 +260,7 @@ def _run_chat_loop(
     model: str,
     *,
     non_interactive: bool,
+    tool_format: str = "markdown",
 ) -> None:
     """外层主循环:不断取下一条输入(命令行参数或终端输入),交给中层处理。
 
@@ -275,7 +284,7 @@ def _run_chat_loop(
         manager.append(Message("user", content))
         _print_message(Message("user", content))
         try:
-            _process_message_conversation(manager, model)
+            _process_message_conversation(manager, model, tool_format)
         except KeyboardInterrupt:
             # 中断发生在模型生成期间(工具执行期间的中断由 execute_msg 收尾)
             manager.append(Message("system", INTERRUPT_CONTENT, quiet=True))
@@ -294,20 +303,24 @@ def chat(
     model: str,
     *,
     non_interactive: bool = False,
+    tool_format: str = "markdown",
 ) -> LogManager:
     """会话入口:准备会话 → 进入对话循环 → 返回会话管理器。
 
     - 新会话:先把系统提示词(身份 + 工具说明 + 时间)写进日志;
     - 旧会话:重新打开,把历史消息打印一遍,接着聊;
     - prompts:开场就要发送的输入(命令行传进来的);non_interactive
-      见 _run_chat_loop 的说明。
+      见 _run_chat_loop 的说明;
+    - tool_format:"markdown" 或 "tool"(原生工具调用)。
 
     返回 LogManager,测试用它检查日志内容;正常调用可以忽略返回值。
     """
     tools = get_tools()
     manager = LogManager.load(logdir, create=True)
     if len(manager) == 0:
-        for msg in get_prompt(tools):  #  拿到工具使用说明（system message）
+        for msg in get_prompt(
+            tools, native=tool_format == "tool"
+        ):  #  拿到工具使用说明（system message）
             manager.append(msg, sync=True)
     else:
         # 恢复会话:回放已打印的历史
@@ -320,5 +333,6 @@ def chat(
             list(prompts),
             model,
             non_interactive=non_interactive,
+            tool_format=tool_format,
         )
     return manager

@@ -10,6 +10,7 @@
 - _StreamWithMetadata:包装流式生成器的一个小类。Python 生成器可以在
   结束时"带回一个返回值"(通过 StopIteration 异常的 value 属性),
   这个类负责把它取出来存好 —— 这样"提前停止生成"后也照样能拿到用量;
+
 - 断点检测(break_on_tooluse):模型生成的文字是一小段一小段到达的,
   每凑满一行就检查一次:已经到达的文字里有没有"写完整的工具调用"?
   一旦发现,立刻停止接收剩余生成 —— 工具马上执行,后面的文字也不要了
@@ -25,6 +26,7 @@ from my_agent_alpha.llm.mock import stream as mock_stream
 from my_agent_alpha.llm.models import PROVIDERS, ModelMeta, ProviderCfg, resolve_model
 from my_agent_alpha.llm.openai_compat import stream as openai_stream
 from my_agent_alpha.message import Message
+from my_agent_alpha.tools.base import ToolSpec
 
 __all__ = ["Message", "ModelMeta", "reply", "resolve_model"]
 
@@ -54,6 +56,9 @@ class _StreamWithMetadata:
 
     背景:生成器结束时可以带一个返回值,但它藏在 StopIteration 异常里,
     平时的 for 循环拿不到。这个类把值取出来存好。
+    生成器结束时的返回值(usage 账单)藏在 StopIteration 异常的.value 里
+    for 循环会把它吞掉，手写 next 才有机会捕到 
+    _StreamWithMetadata 就是干这个的(它把 .value 存进 wrapped.metadata)
 
     它自己也是个迭代器,而且支持"中途停、之后接着读"(断点检测会用到:
     提前停止后,把剩余部分读完丢弃,只为在结尾拿到用量信息)。
@@ -93,27 +98,37 @@ def reply(
     model: str,
     *,
     on_token: OnToken | None = None,
-    break_on_tooluse: bool = True,
+    break_on_tooluse: bool = True,# 被工具调用打断（实现一次step仅一个工具调用，除非模型支持并行工具调用（后续补充））
+    tools: Sequence[ToolSpec] = (),
+    tool_format: str = "markdown",
 ) -> Message:
     """把对话发给模型,等它生成完,返回一条 assistant 消息。
 
     - on_token:模型每生成一小段就调用一次(终端实时显示用),不传也行;
     - break_on_tooluse=True(默认):生成过程中一旦凑出完整的工具调用,
       立刻停止接收,返回已收到的部分文字。省钱,而且工具能更早开始跑;
+    - tool_format="tool" 时开启原生工具调用(tools 一起发给接口);
+      模型的调用会被翻译成 "@工具名(编号): {参数}" 行混在文本流里,
+      断点检测同样适用。"markdown"(默认)则一切照旧;
     - 用户按 Ctrl-C:立刻停止,返回"已生成的部分 + '^C 已中断'标记",
       并在 metadata 里记上 interrupted=True(上层循环看到就结束本回合)。
 
     示例:msg = reply(对话消息列表, "deepseek/deepseek-chat")
     """
     meta = resolve_model(model)
+    # 判断是否支持原生工具调用
+    # 如果支持，传入参数tools应不为none（list[ToolSpec]）
+    use_native = tool_format == "tool" 
     if meta.provider == "mock":
         raw: Iterator[str] = mock_stream(messages, meta.model)
     else:
         cfg = PROVIDERS.get(meta.provider) or _custom_cfg(meta.provider)
-        raw = openai_stream(messages, meta, cfg)
+        raw = openai_stream(messages, meta, cfg, tools if use_native else ())
 
-    wrapped = _StreamWithMetadata(raw)
-    parts: list[str] = []  # 收到的所有文字小段
+    # 消费循环
+    # 解析拿到的chunk(raw)
+    wrapped = _StreamWithMetadata(raw) # 包装一层，为了拿到usage
+    parts: list[str] = []  # 收到的所有文字小段（攒着，最后拼完整回复）
     interrupted = False
     broke = False
     try:
@@ -121,9 +136,11 @@ def reply(
             chunk = next(wrapped)
             parts.append(chunk)
             if on_token is not None:
-                on_token(chunk)
+                on_token(chunk)# 终端实时打印
             # 每凑满一行检查一次(检查太频繁会拖慢,行是天然的最小单位)
-            if (
+            if ( # 有可执行的工具，直接打断，不继续接收模型生成
+                # ps：有两个可执行工具怎么办？第二个工具直接打断，但是在下一轮对话ai会再次提出调用这个工具
+                # 什么时候不打断？模型支持并行工具调用的时候，可以选择不打断
                 break_on_tooluse
                 and "\n" in chunk
                 and _has_complete_runnable_tooluse("".join(parts))
@@ -136,14 +153,14 @@ def reply(
         pass  # 正常结束:用量信息已被包装器存好
 
     if broke:
-        # 把剩余的生成内容读完(内容直接丢弃),只为在结尾拿到用量信息
+        # 把剩余的生成内容读完(内容直接丢弃，但是生成内容的结尾有usage，需要拿到)
         try:
             while True:
-                next(wrapped)
+                next(wrapped) # 在Generator的最后拿到返回值usage
         except StopIteration:
             pass
 
-    text = "".join(parts)
+    text = "".join(parts) # 攒起来的内容放进content（text）里
     if interrupted:
         text += _INTERRUPT_MARKER
     metadata: dict[str, object] = {"model": meta.full}

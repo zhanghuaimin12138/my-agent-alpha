@@ -15,7 +15,7 @@ from pathlib import Path
 
 from my_agent_alpha.context import get_logdir, get_workspace
 from my_agent_alpha.message import Message
-from my_agent_alpha.tools.base import ToolSpec
+from my_agent_alpha.tools.base import Parameter, ToolSpec
 
 _TIMEOUT = int(os.environ.get("ALPHA_SHELL_TIMEOUT", "60"))
 _MAX_OUTPUT_CHARS = int(os.environ.get("ALPHA_SHELL_MAX_OUTPUT", "8000"))
@@ -49,11 +49,19 @@ def _save_full_output(command: str, text: str) -> Path | None:
 def execute_shell(
     code: str | None, args: list[str] | None, kwargs: dict[str, str] | None
 ) -> Iterator[Message]:
-    """在工作区用 bash 执行命令,产出带 ReturnCode 的结果消息。"""
-    assert code is not None
+    """在工作区用 bash 执行命令,产出带 ReturnCode 的结果消息。
+
+    两种调用通道在这里汇合:
+    - markdown 通道:命令在代码块里,code = "ls -la";
+    - 原生通道:参数是字典,kwargs = {"command": "ls -la"}。
+    """
+    command = (kwargs.get("command") if kwargs else None) or code
+    if not command:
+        yield Message("system", "错误: shell 没有收到要执行的命令")
+        return
     try:
         proc = subprocess.run(
-            code,
+            command,
             shell=True,
             cwd=get_workspace(),
             capture_output=True,
@@ -62,7 +70,7 @@ def execute_shell(
             timeout=_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
-        yield Message("system", f"命令超时(>{_TIMEOUT}s)被终止:\n$ {code}")
+        yield Message("system", f"命令超时(>{_TIMEOUT}s)被终止:\n$ {command}")
         return
 
     output = ""
@@ -72,12 +80,12 @@ def execute_shell(
         output += ("\n" if output else "") + proc.stderr
     output = output.rstrip("\n") or "(无输出)"
 
-    full_path = _save_full_output(code, output)
+    full_path = _save_full_output(command, output)
     truncated = _truncate(output, _MAX_OUTPUT_CHARS) != output
     note = f"\n(输出过长已截断,完整输出: {full_path})" if full_path and truncated else ""
     yield Message(
         "system",
-        f"$ {code}\n{_truncate(output, _MAX_OUTPUT_CHARS)}\nReturnCode: {proc.returncode}{note}",
+        f"$ {command}\n{_truncate(output, _MAX_OUTPUT_CHARS)}\nReturnCode: {proc.returncode}{note}",
     )
 
 
@@ -90,5 +98,6 @@ tool = ToolSpec(
     ),
     examples="```shell\nls -la\n```",
     block_types=("shell", "sh", "bash"),
+    parameters=(Parameter("command", "string", "要执行的 bash 命令"),),
     execute=execute_shell,
 )

@@ -100,3 +100,40 @@ def _has_blank_line_after(lines: list[str], close_index: int) -> bool:
     if close_index + 1 >= len(lines):
         return False
     return lines[close_index + 1].strip() == ""
+
+
+def fenced_regions(text: str) -> list[tuple[int, int]]:
+    """找出所有围栏代码块在原文中的字符区间 [(起点, 终点), ...]。
+
+    用途:
+    1.原生工具调用模式：
+        在围栏代码块里的"@save(...): {...)",要跳过，这是示例，
+        在围栏代码块外的，是真正的工具调用
+    2.markdown格式工具调用模式:
+        在围栏代码块里的是工具调用
+    
+    没闭合的围栏也算一个区间(同样要跳过)。
+
+    示例:fenced_regions("说明\\n```shell\\nls\\n```\\n后文")
+    → [(3, 23)]   ← "```shell" 那行开头到 "```" 那行结尾
+    """
+    text = text.replace("\r\n", "\n")
+    regions: list[tuple[int, int]] = []
+    offset = 0  # 当前行的起始字符偏移
+    in_block = False
+    open_ticks = 0
+    start = 0
+    for line in text.split("\n"):
+        match = _FENCE_RE.match(line.lstrip())
+        if not in_block:
+            if match:
+                in_block = True
+                open_ticks = len(match.group(1))
+                start = offset
+        elif match and len(match.group(1)) >= open_ticks and not match.group(2):
+            regions.append((start, offset + len(line)))
+            in_block = False
+        offset += len(line) + 1  # +1 是被 split 吃掉的换行符
+    if in_block:  # 没闭合的围栏:一路占到文末
+        regions.append((start, len(text)))
+    return regions

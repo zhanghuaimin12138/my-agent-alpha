@@ -15,7 +15,7 @@ from pathlib import Path
 
 from my_agent_alpha.context import get_workspace
 from my_agent_alpha.message import Message
-from my_agent_alpha.tools.base import ToolSpec
+from my_agent_alpha.tools.base import Parameter, ToolSpec
 
 # 占位符检测:LLM 常用 "# ..." / "..." 代替真实实现,直接写盘只会产出垃圾文件
 _PLACEHOLDERS = ("# ...", "# TODO: implement", "...", "…")
@@ -35,13 +35,19 @@ def _check_placeholder(path: Path, content: str) -> str | None:
     return None
 
 
-def _validate(code: str | None, args: list[str] | None) -> tuple[Path, str] | str:
+def _validate(
+    code: str | None, args: list[str] | None, kwargs: dict[str, str] | None
+) -> tuple[Path, str] | str:
     """检查参数并整理出(文件路径, 文件内容);参数不对时返回错误说明字符串。
 
-    约定:fence 头带路径,代码块就是文件内容,如 ```save a.txt\n内容\n```。
+    两种通道:markdown 是 fence 头带路径、代码块当内容;
+    原生是 kwargs = {"path": ..., "content": ...}。
     """
+    if kwargs and kwargs.get("path") is not None:
+        content = kwargs.get("content", "")
+        return _resolve(str(kwargs["path"])), content
     if not args:
-        return "错误: save/append 的 fence 头需要路径参数,如 ```save path/to/file"
+        return "错误: save/append 需要路径参数(markdown:fence 头;原生:path 参数)"
     assert code is not None
     return _resolve(args[0]), code
 
@@ -53,7 +59,7 @@ def execute_save(
 
     示例:```save a.txt\\n你好\\n``` → 在工作区创建 a.txt,内容"你好\\n"。
     """
-    validated = _validate(code, args)
+    validated = _validate(code, args, kwargs)
     if isinstance(validated, str):
         yield Message("system", validated)
         return
@@ -76,7 +82,7 @@ def execute_append(
     自动处理换行:原文件末尾没换行会先补一个,新内容也保证以换行结尾,
     避免新内容黏在旧内容的行尾上。
     """
-    validated = _validate(code, args)
+    validated = _validate(code, args, kwargs)
     if isinstance(validated, str):
         yield Message("system", validated)
         return
@@ -101,6 +107,10 @@ save_tool = ToolSpec(
     instructions="必须写入完整内容;不确定就先 read 再改。不允许占位符。",
     examples="```save hello.py\nprint('hello')\n```",
     block_types=("save",),
+    parameters=(
+        Parameter("path", "string", "要写入的文件路径"),
+        Parameter("content", "string", "完整的文件内容"),
+    ),
     execute=execute_save,
 )
 
@@ -109,5 +119,9 @@ append_tool = ToolSpec(
     desc="向文件末尾追加内容(自动补换行)。fence 头带路径。",
     examples="```append notes.md\n- 新的一行\n```",
     block_types=("append",),
+    parameters=(
+        Parameter("path", "string", "要追加到的文件路径"),
+        Parameter("content", "string", "要追加的内容"),
+    ),
     execute=execute_append,
 )

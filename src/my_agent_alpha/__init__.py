@@ -30,7 +30,7 @@ __all__ = [
     "utcnow",
 ]
 
-_DEFAULT_MODEL = os.environ.get("ALPHA_MODEL", "mock/echo")#得到默认模型
+_DEFAULT_MODEL = os.environ.get("ALPHA_MODEL", "mock/echo")  # 得到默认模型
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -46,6 +46,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("-n", "--non-interactive", action="store_true", help="跑完队列提示词即退出")
     parser.add_argument("--name", help="会话名(logdir 目录名);缺省自动生成")
     parser.add_argument("--workspace", type=Path, default=Path.cwd(), help="agent 的工作目录")
+    parser.add_argument(
+        "--tool-format",
+        choices=["markdown", "tool"],
+        default=os.environ.get("ALPHA_TOOL_FORMAT", "markdown"),
+        help="工具调用通道:markdown(围栏代码块)或 tool(原生 function calling)",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args(argv)
 
@@ -63,6 +69,7 @@ def main(argv: list[str] | None = None) -> None:
             workspace=args.workspace,
             model=args.model,
             non_interactive=non_interactive,
+            tool_format=args.tool_format,
         )
     except KeyboardInterrupt:
         sys.exit(130)

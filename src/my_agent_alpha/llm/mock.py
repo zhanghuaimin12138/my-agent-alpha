@@ -28,7 +28,7 @@ _scripted: list[str | BaseException] = []
 _CHUNK_SIZE = 3
 
 
-def set_scripted_replies(replies: Sequence[str | BaseException]) -> None:
+def set_scripted_replies(replies: Sequence[str | BaseException] | str | BaseException) -> None:
     """设置脚本回复序列(每次调用覆盖之前的);放异常实例则到它时直接抛出。
 
     示例(在测试里导演一次"调工具再收尾"的对话):
@@ -36,9 +36,15 @@ def set_scripted_replies(replies: Sequence[str | BaseException]) -> None:
             "我来执行:\\n```shell\\necho hi\\n```",   # 第一轮:模型"决定"调工具
             "输出是 hi,完成。",                        # 第二轮:收尾
         ])
+
+    防呆:直接传一个字符串时按"只有一条回复"处理 ——
+    不然 extend(字符串) 会把它拆成单个字符当一堆回复,极难排查。
     """
     _scripted.clear()
-    _scripted.extend(replies)
+    if isinstance(replies, str | BaseException):
+        _scripted.append(replies)
+    else:
+        _scripted.extend(replies)
 
 
 def clear_scripted() -> None:

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+from dataclasses import replace
 
 from my_agent_alpha.message import INTERRUPT_CONTENT, Message
 from my_agent_alpha.tools import read as read_mod
@@ -73,15 +74,18 @@ def execute_msg(msg: Message) -> list[Message]:
     - 某个工具出错:错误变成一条 system 消息放结果里,
       不影响后面的调用继续执行(模型看到错误会自己想办法);
     - 用户按 Ctrl-C:已经执行完的结果保留,被中断的和还没轮到的调用
-      各生成一条"未执行"说明 —— 保证"执行过什么"在日志里永远有记录。
+      各生成一条"未执行"说明 —— 保证"执行过什么"在日志里永远有记录;
+    - 原生调用的结果:最后一条消息盖上 call_id(接口要求每个调用
+      恰好配一个带编号的结果;盖在最后一条是因为有的工具产出多条消息,
+      编号只能盖一个)。
     """
     results: list[Message] = []
-    tooluses = list(ToolUse.iter_from_content(msg.content))
-    for i, tooluse in enumerate(tooluses):
+    tooluses = list(ToolUse.iter_from_content(msg.content)) # 从一条assitant消息解析出list[tooluse]
+    for i, tooluse in enumerate(tooluses):# 遍历list[tooluse]
         if not tooluse.is_runnable:
             continue
         try:
-            results.extend(tooluse.execute())
+            executed = list(tooluse.execute()) # 得到一个tooluse的执行结果msg/list[msg]
         except KeyboardInterrupt:
             results.append(
                 Message("system", f"{INTERRUPT_CONTENT} 工具 {tooluse.tool.name} 被中断,未执行")
@@ -90,4 +94,11 @@ def execute_msg(msg: Message) -> list[Message]:
                 if u.is_runnable:
                     results.append(Message("system", f"工具 {u.tool.name} 因中断未执行"))
             return results
+        if tooluse.call_id and executed:
+            # 如果这个tooluse有call_id并且有执行结果，那就把call_id写在最后一条msg上
+            # 原生工具调用有一条铁律:一个 call_id ←必须恰好配→ 一条 tool 角色的结果消息
+            
+            # 把 call_id 盖在最后一条结果上(消息不可变,用 replace 造新的)
+            executed[-1] = replace(executed[-1], call_id=tooluse.call_id)
+        results.extend(executed)
     return results
