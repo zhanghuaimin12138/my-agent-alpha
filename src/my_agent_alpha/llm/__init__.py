@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Iterator, Sequence
 
+from my_agent_alpha.llm.errors import ContextLengthError as ContextLengthError
 from my_agent_alpha.llm.mock import stream as mock_stream
 from my_agent_alpha.llm.models import PROVIDERS, ModelMeta, ProviderCfg, resolve_model
 from my_agent_alpha.llm.openai_compat import stream as openai_stream

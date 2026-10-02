@@ -22,6 +22,7 @@ import time
 from collections.abc import Generator, Sequence
 from typing import Any, cast
 
+from my_agent_alpha.llm.errors import ContextLengthError
 from my_agent_alpha.llm.models import ModelMeta, ProviderCfg
 from my_agent_alpha.message import Message
 from my_agent_alpha.tools.base import ToolSpec, find_json_end, spec_to_openai_tool
@@ -33,6 +34,20 @@ _BACKOFF_CAP = 30.0
 def _backoff(attempt: int) -> float:
     """第 attempt 次重试前要等多久:1秒、2秒、4秒……最多 30 秒(越错越等得久)。"""
     return min(2.0**attempt, _BACKOFF_CAP)
+
+
+def _is_context_length(exc: BaseException) -> bool:
+    """判断一个异常是不是"历史超长被接口拒绝"。
+
+    接口对此返回 400(BadRequest),错误消息里通常含
+    "context length" / "maximum context" 等字样。
+    """
+    import openai
+
+    if not isinstance(exc, openai.BadRequestError):
+        return False
+    text = str(exc).lower()
+    return "context length" in text or "maximum context" in text or "too long" in text
 
 
 def _is_transient(exc: BaseException) -> bool:
@@ -198,6 +213,8 @@ def chat(
                 text += f"\n@{fn.name}({tc.id}): {fn.arguments}"
             return text, _extract_usage(resp.usage)
         except Exception as e:
+            if _is_context_length(e):
+                raise ContextLengthError(str(e)) from e
             if not _is_transient(e) or attempt == _MAX_RETRIES:
                 raise
             last_err = e
@@ -336,6 +353,8 @@ def stream(
         except StopIteration as e:
             return cast("dict[str, int] | None", e.value)
         except Exception as e:
+            if _is_context_length(e):
+                raise ContextLengthError(str(e)) from e
             if not _is_transient(e) or emitted or attempt == _MAX_RETRIES:
                 raise
             time.sleep(_backoff(attempt))

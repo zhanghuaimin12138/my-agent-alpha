@@ -20,12 +20,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 from my_agent_alpha.commands import builtin as builtin_commands
 from my_agent_alpha.commands import execute_cmd
+from my_agent_alpha.compaction import compact_messages, get_context_budget
 from my_agent_alpha.confirm import (
     ConfirmationResult,
     clear_confirm_hooks,
@@ -33,10 +35,10 @@ from my_agent_alpha.confirm import (
     register_confirm_hook,
     set_auto_confirm,
 )
-from my_agent_alpha.context import agent_context
+from my_agent_alpha.context import agent_context, get_logdir
 from my_agent_alpha.hooks import HookType, trigger_hook
 from my_agent_alpha.hooks import builtin as builtin_hooks
-from my_agent_alpha.llm import reply
+from my_agent_alpha.llm import ContextLengthError, reply, resolve_model
 from my_agent_alpha.logmanager import LogManager
 from my_agent_alpha.message import (
     DECLINED_CONTENT,
@@ -49,6 +51,8 @@ from my_agent_alpha.tools import execute_msg, get_tools
 from my_agent_alpha.tools.base import ToolUse
 from my_agent_alpha.tools.shell_safety import guardrail_hook, readonly_hook
 
+logger = logging.getLogger(__name__)
+
 MAX_STEPS = int(os.environ.get("ALPHA_MAX_STEPS", "50"))
 
 # ---- 内层:一轮"问模型 + 执行工具" ----
@@ -59,6 +63,7 @@ def step(
     model: str,
     on_token: Callable[[str], None] | None = None,
     tool_format: str = "markdown",
+    budget: int | None = None,
 ) -> Iterator[Message]:
     """执行一轮:把对话发给模型,产出模型回复,再产出工具执行结果。
 
@@ -74,22 +79,35 @@ def step(
         yield 模型回复("我来执行:\n```shell\nls\n```")
         yield 工具输出("$ ls\na.txt\nReturnCode: 0")
     """
-    msgs = prepare_messages(log_messages)
+    msgs = prepare_messages(log_messages, model, budget=budget)
     tools = get_tools() if tool_format == "tool" else ()  # 如果支持原生调用需要拿到list[toolSpec]
-    msg_response = reply(msgs, model, on_token=on_token, tools=tools, tool_format=tool_format)
+    try:
+        msg_response = reply(msgs, model, on_token=on_token, tools=tools, tool_format=tool_format)
+    except ContextLengthError:
+        # 溢出自愈:预算砍半、更狠地压缩,再试一次(只重试这一次)
+        meta = resolve_model(model)
+        emergency = max((budget or get_context_budget(meta.context)) // 2, 1000)
+        logger.warning("上下文超长,以预算 %d 重压缩重试一次", emergency)
+        msgs = prepare_messages(log_messages, model, budget=emergency)
+        msg_response = reply(msgs, model, on_token=on_token, tools=tools, tool_format=tool_format)
     yield msg_response
     # 生成完毕钩子:产出的消息跟在模型回复后面进日志(如 [用量] 记录)
     yield from trigger_hook(HookType.GENERATION_POST, message=msg_response)
     yield from execute_msg(msg_response)
 
 
-def prepare_messages(messages: Sequence[Message]) -> list[Message]:
-    """决定"发给模型哪些消息"。当前阶段:原样全发。
+def prepare_messages(
+    messages: Sequence[Message], model: str, budget: int | None = None
+) -> list[Message]:
+    """决定"发给模型哪些消息":超预算时压缩视图,日志本身不动。
 
-    为什么单独一个函数?以后要在这里做上下文压缩(阶段 6):
-    对话太长时摘要旧消息,只把摘要发給模型。现在先占住这个位置。
+    - budget 不传时按模型的上下文窗口自动算(见 compaction.get_context_budget);
+    - 压缩只改这份返回值(视图),log.messages 原封不动 —— 磁盘日志永不改写;
+    - 详细的压缩规则见 compaction 模块(剥思考 → 截工具结果 → 压长回复 → 硬截断)。
     """
-    return list(messages)
+    meta = resolve_model(model)
+    effective = budget if budget is not None else get_context_budget(meta.context)
+    return compact_messages(list(messages), effective, get_logdir())
 
 
 def has_runnable_tooluse(messages: Sequence[Message]) -> bool:
