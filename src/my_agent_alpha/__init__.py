@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -30,7 +29,7 @@ __all__ = [
     "utcnow",
 ]
 
-_DEFAULT_MODEL = os.environ.get("ALPHA_MODEL", "mock/echo")  # 得到默认模型
+# 模型/通道的最终取值在 main() 里按 命令行 > 环境变量 > 配置文件 解析(见 config.py)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -41,7 +40,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("prompts", nargs="*", help="开场提示词;缺省进入交互模式")
     parser.add_argument(
-        "-m", "--model", default=_DEFAULT_MODEL, help="模型名,如 deepseek/deepseek-chat"
+        "-m", "--model", default=None, help="模型名,如 deepseek/deepseek-chat(默认取配置)"
     )
     parser.add_argument("-n", "--non-interactive", action="store_true", help="跑完队列提示词即退出")
     parser.add_argument("--name", help="会话名(logdir 目录名);缺省自动生成")
@@ -49,15 +48,27 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--tool-format",
         choices=["markdown", "tool"],
-        default=os.environ.get("ALPHA_TOOL_FORMAT", "markdown"),
+        default=None,
         help="工具调用通道:markdown(围栏代码块)或 tool(原生 function calling)",
     )
     parser.add_argument("-y", "--yes", action="store_true", help="全部自动确认(安全护栏仍然生效)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args(argv)
 
+    from my_agent_alpha import chat as chat_mod
     from my_agent_alpha.chat import chat
+    from my_agent_alpha.config import (
+        Config,
+        effective_max_steps,
+        effective_model,
+        effective_tool_format,
+    )
     from my_agent_alpha.dirs import get_logs_dir
+
+    config = Config.load(args.workspace)
+    model = effective_model(args.model, config)
+    tool_format = effective_tool_format(args.tool_format, config)
+    chat_mod.MAX_STEPS = effective_max_steps(config, chat_mod.MAX_STEPS)
 
     session_name = args.name or generate_conversation_id()
     logdir = get_logs_dir() / session_name
@@ -68,9 +79,9 @@ def main(argv: list[str] | None = None) -> None:
             args.prompts,
             logdir=logdir,
             workspace=args.workspace,
-            model=args.model,
+            model=model,
             non_interactive=non_interactive,
-            tool_format=args.tool_format,
+            tool_format=tool_format,
             yes=args.yes,
         )
     except KeyboardInterrupt:

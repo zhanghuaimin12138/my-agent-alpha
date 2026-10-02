@@ -24,6 +24,8 @@ import os
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
+from my_agent_alpha.commands import builtin as builtin_commands
+from my_agent_alpha.commands import execute_cmd
 from my_agent_alpha.confirm import (
     ConfirmationResult,
     clear_confirm_hooks,
@@ -32,6 +34,8 @@ from my_agent_alpha.confirm import (
     set_auto_confirm,
 )
 from my_agent_alpha.context import agent_context
+from my_agent_alpha.hooks import HookType, trigger_hook
+from my_agent_alpha.hooks import builtin as builtin_hooks
 from my_agent_alpha.llm import reply
 from my_agent_alpha.logmanager import LogManager
 from my_agent_alpha.message import (
@@ -46,9 +50,6 @@ from my_agent_alpha.tools.base import ToolUse
 from my_agent_alpha.tools.shell_safety import guardrail_hook, readonly_hook
 
 MAX_STEPS = int(os.environ.get("ALPHA_MAX_STEPS", "50"))
-
-_COMMANDS = {"exit", "quit", "help"}
-
 
 # ---- 内层:一轮"问模型 + 执行工具" ----
 
@@ -77,6 +78,8 @@ def step(
     tools = get_tools() if tool_format == "tool" else ()  # 如果支持原生调用需要拿到list[toolSpec]
     msg_response = reply(msgs, model, on_token=on_token, tools=tools, tool_format=tool_format)
     yield msg_response
+    # 生成完毕钩子:产出的消息跟在模型回复后面进日志(如 [用量] 记录)
+    yield from trigger_hook(HookType.GENERATION_POST, message=msg_response)
     yield from execute_msg(msg_response)
 
 
@@ -190,6 +193,7 @@ def _process_message_conversation(
     """
     steps = 0
     while True:
+        _dispatch_hooks(manager, HookType.STEP_PRE, model=model)
         printer = _StreamPrinter()
         interrupted = False
         declined = False
@@ -218,6 +222,20 @@ def _process_message_conversation(
             return
         if not has_runnable_tooluse(manager.messages):
             return
+
+
+# ---- 钩子分发:生命周期的统一出口 ----
+
+
+def _dispatch_hooks(manager: LogManager, hook_type: HookType, **ctx: object) -> None:
+    """触发一个生命周期点:钩子产出的消息立刻落盘并显示。
+
+    这是钩子和日志系统的接合点:钩子只管产出消息,落盘/打印都由这里统一做。
+    (manager 会作为上下文的一部分自动传给钩子)
+    """
+    for msg in trigger_hook(hook_type, manager=manager, **ctx):
+        manager.append(msg)
+        _print_message(msg)
 
 
 # ---- 确认链:终端里问用户 ----
@@ -305,22 +323,6 @@ def _get_user_input() -> Message | None:
             return Message("user", content)
 
 
-def _handle_command(content: str) -> bool:
-    """处理 / 开头的命令(目前只有 /exit /quit /help)。
-
-    返回 True 表示这条输入是命令、已经处理完,不要当成对话内容;
-    返回 False 表示不是认识的命令,按普通对话处理。
-    """
-    name = content.strip().lstrip("/").split(" ", 1)[0].lower()
-    if name not in _COMMANDS:
-        return False
-    if name in ("exit", "quit"):
-        raise SystemExit(0)
-    if name == "help":
-        print("命令:/exit /quit 退出;/help 帮助。其余 / 开头消息按普通文本处理。")
-    return True
-
-
 def _print_message(msg: Message) -> None:
     """把一条消息打印到终端(用户输入带 > 前缀,工具输出带 │ 前缀)。
 
@@ -360,11 +362,12 @@ def _run_chat_loop(
                 return
             content = msg.content
 
-        if content.startswith("/") and _handle_command(content):
+        if content.startswith("/") and execute_cmd(content, manager, model):
             continue
 
         manager.append(Message("user", content))
         _print_message(Message("user", content))
+        _dispatch_hooks(manager, HookType.TURN_PRE, content=content)
         try:
             _process_message_conversation(manager, model, tool_format)
         except KeyboardInterrupt:
@@ -376,6 +379,8 @@ def _run_chat_loop(
                 raise  # 脚本模式:让异常带着错误码退出
             manager.append(Message("system", f"{LLM_REQUEST_FAILED_PREFIX} {e}"))
             print(f"\n{LLM_REQUEST_FAILED_PREFIX} {e}(回到提示符)")
+        _dispatch_hooks(manager, HookType.TURN_POST)
+        _dispatch_hooks(manager, HookType.LOOP_CONTINUE)
 
 
 def chat(
@@ -400,6 +405,13 @@ def chat(
     返回 LogManager,测试用它检查日志内容;正常调用可以忽略返回值。
     """
     tools = get_tools()
+    # 确保内置钩子/命令就位(同名重注册=替换,幂等)。
+    # 注意:不清别人的钩子!调用方在会话前注册的自定义钩子必须存活;
+    # 想清场请显式调 clear_hooks()(测试的 conftest 就是这么做的)。
+    builtin_commands.register_builtin_commands()
+    # 注册消息hook（生命周期）
+    builtin_hooks.register_builtin_hooks()
+    # 激活确认链
     _setup_confirm_hooks(interactive=not non_interactive, yes=yes)
     manager = LogManager.load(logdir, create=True)
     if len(manager) == 0:
@@ -413,11 +425,15 @@ def chat(
             _print_message(msg)
 
     with agent_context(workspace, logdir):
-        _run_chat_loop(
-            manager,
-            list(prompts),
-            model,
-            non_interactive=non_interactive,
-            tool_format=tool_format,
-        )
+        _dispatch_hooks(manager, HookType.SESSION_START, model=model)
+        try:
+            _run_chat_loop(
+                manager,
+                list(prompts),
+                model,
+                non_interactive=non_interactive,
+                tool_format=tool_format,
+            )
+        finally:
+            _dispatch_hooks(manager, HookType.SESSION_END)
     return manager

@@ -273,9 +273,9 @@ class ToolUse:
         → 新调用的 content = "echo hello";
         原生的 {"command": "echo hi"} → kwargs["command"] = "echo hello"。
         """
-        if self.kwargs:# 原生通道
+        if self.kwargs:  # 原生通道
             new_kwargs = dict(self.kwargs)
-            for key in ("command", "content"):# command是shell的参数，content是save和append的参数
+            for key in ("command", "content"):  # command是shell的参数，content是save和append的参数
                 if key in new_kwargs:
                     new_kwargs[key] = edited
                     break

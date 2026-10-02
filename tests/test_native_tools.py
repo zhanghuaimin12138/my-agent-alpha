@@ -279,11 +279,21 @@ def test_e2e_native_tool_loop(logdir: Path, workspace: Path) -> None:
     )
     manager = LogManager.load(logdir)
     roles = [m.role for m in manager.messages]
-    assert roles == ["system", "system", "user", "assistant", "system", "assistant"]
+    # 阶段 5 起,每次模型回复后默认有 [用量] 钩子产出一条 system 消息
+    assert roles == [
+        "system",
+        "system",
+        "user",
+        "assistant",
+        "system",
+        "system",
+        "assistant",
+        "system",
+    ]
     contents = [m.content for m in manager.messages]
-    assert "native-e2e" in contents[4]
+    assert "native-e2e" in contents[5]  # [用量] 在 4,工具输出在 5
     # 原生模式系统提示词:教的是 function calling,不是围栏约定
     assert "function calling" in contents[0]
     assert "围栏" not in contents[0]
     # 工具结果带 call_id 配对
-    assert manager.messages[4].call_id == "call_1"
+    assert manager.messages[5].call_id == "call_1"

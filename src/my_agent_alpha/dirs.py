@@ -37,3 +37,15 @@ def get_logs_dir() -> Path:
     logs_dir = Path(override).expanduser() if override else get_data_dir() / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     return logs_dir
+
+
+def get_config_dir() -> Path:
+    """返回配置目录(不存在则创建):~/.config/my_agent_alpha。
+
+    遵守 XDG_CONFIG_HOME;用户级 config.toml 放这里。
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    config_dir = base / "my_agent_alpha"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir

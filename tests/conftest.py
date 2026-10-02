@@ -33,12 +33,14 @@ def _reset_agent_state(workspace: Path, logdir: Path) -> Iterator[None]:
     """
     from my_agent_alpha import context
     from my_agent_alpha.confirm import clear_confirm_hooks
+    from my_agent_alpha.hooks import clear_hooks
     from my_agent_alpha.llm import mock as llm_mock
     from my_agent_alpha.tools import clear_tools
 
     llm_mock.clear_scripted()
     clear_tools()
     clear_confirm_hooks()
+    clear_hooks()
     with context.agent_context(workspace, logdir):
         yield
     llm_mock.clear_scripted()

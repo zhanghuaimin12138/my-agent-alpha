@@ -40,12 +40,24 @@ def test_full_turn_with_tool_call(logdir: Path, workspace: Path, capsys) -> None
 
     manager = LogManager.load(logdir)
     roles = [m.role for m in manager.messages]
-    # 系统提示词 ×2、user、assistant(含调用)、system(工具输出)、assistant(收尾)
-    assert roles == ["system", "system", "user", "assistant", "system", "assistant"]
+    # 阶段 5 起,每次模型回复后默认有 [用量] 钩子产出一条 system 消息:
+    # 系统提示词×2、user、assistant(含调用)、system(用量)、system(工具输出)、
+    # assistant(收尾)、system(用量)
+    assert roles == [
+        "system",
+        "system",
+        "user",
+        "assistant",
+        "system",
+        "system",
+        "assistant",
+        "system",
+    ]
     contents = [m.content for m in manager.messages]
     assert "```shell\necho hello-spine\n```" in contents[3]
-    assert "hello-spine" in contents[4]
-    assert "任务完成" in contents[5]
+    assert contents[4].startswith("[用量]")  # 内置 usage 钩子在干活
+    assert "hello-spine" in contents[5]
+    assert "任务完成" in contents[6]
     # 系统提示词消息 pinned + hide
     assert manager.messages[0].pinned and manager.messages[0].hide
     # 终端确实渲染了工具输出(审查 #13:工具输出行带 $ 前缀,不再用会撞车的子串断言)
