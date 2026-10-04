@@ -14,7 +14,9 @@
   解析成 lang="save"(工具名)、args="path/to/file"(参数,比如文件路径);
 - 围栏可以更长(````),闭合围栏至少和开头一样长、且行内没有别的内容;
 - 没闭合的块直接丢弃 —— 只执行写完整的块,绝不执行半截命令;
-- 行首有缩进也能识别(模型偶尔会把代码块缩进)。
+- 行首有缩进也能识别(模型偶尔会把代码块缩进);
+- 解析前先剥掉 <think>...</think> 思考区(gptme 同款):思考里的围栏
+  不是工具调用,粘在 </think> 后面的围栏剥完才能落到行首被识别。
 """
 
 from __future__ import annotations
@@ -25,6 +27,35 @@ from dataclasses import dataclass
 
 # 匹配一行开头的三根及以上反引号,后面可跟"语言 参数"
 _FENCE_RE = re.compile(r"^(`{3,})\s*(.*?)\s*$")
+
+# 匹配一段完整的思考区:<think>...</think> 或 <thinking>...</thinking>(Gemini 的写法),
+# 开闭两种标签名允许混搭;re.DOTALL 让思考区可以跨任意多行
+_THINK_SPAN_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
+# 匹配"独立出现在行首的开标签":用来识别还没闭合的思考区。
+# (写在行中间的 <think>,比如被粘在别的内容后面的,不算思考区开始)
+_THINK_OPEN_RE = re.compile(r"(?:^|\n)[ \t]*<think(?:ing)?>")
+
+
+def strip_think(text: str) -> str:
+    """剥掉 <think>...</think> 思考区,只留正式回复;没闭合的思考区整体不解析。
+
+    为什么解析工具调用前要先剥(仿 gptme codeblock.py 的做法):
+    1. 思考区是模型的草稿,里面就算写了合法围栏也不是工具调用,不该执行;
+    2. 有的模型(如 kimi)习惯把围栏紧跟在 </think> 后面写在同一行,
+       而开栏必须在行首才被识别 —— 剥掉思考区后围栏自然落到行首,解析器才看得见
+       (2026-10-04 实测踩坑:kimi 三次工具调用全部因此静默消失)。
+
+    示例:
+        strip_think("<think>推理…</think>```shell\\nls\\n```")
+        → "```shell\\nls\\n```"
+        strip_think("<think>只写了一半") → ""   ← 没闭合,宁可全部不解析
+    """
+    stripped = _THINK_SPAN_RE.sub("", text)
+    if _THINK_OPEN_RE.search(stripped):
+        # 剥完还剩一个行首开标签没等到闭合:内容只写了一半(流式生成中),
+        # 什么都可能变,整体放弃解析 —— 宁可不执行,不执行半截
+        return ""
+    return stripped
 
 
 @dataclass(frozen=True)
@@ -54,7 +85,11 @@ def iter_from_markdown(text: str, *, streaming: bool = False) -> Iterator[Codebl
     为什么?生成到一半时看到 "```",它可能是真闭合,也可能只是
     更长代码块里的内层围栏 —— 等到下一行是空行,才能确定这个块真的结束了。
     执行工具时(生成已结束)用默认 streaming=False,不需要这个额外确认。
+
+    解析前先把 <think>...</think> 思考区剥掉(见 strip_think):思考里的围栏
+    不是工具调用;粘在 </think> 后面的围栏剥完就落到行首,能被正常识别。
     """
+    text = strip_think(text)
     text = text.replace("\r\n", "\n")  # Windows 换行符(\r\n)统一成 \n,否则命令尾部会带看不见的 \r
     lines = text.split("\n")
     offset = 0  # 当前行的起始字符偏移

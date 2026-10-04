@@ -61,3 +61,34 @@ def test_multiline_content_preserved() -> None:
     text = "```shell\ncd /tmp\nls\npwd\n```"
     blocks = list(iter_from_markdown(text))
     assert blocks[0].content == "cd /tmp\nls\npwd"
+
+
+# ---- 思考区(<think>)剥离:gptme 同款,2026-10-04 kimi 粘连格式的回归 ----
+
+
+def test_think_block_stripped_before_parsing() -> None:
+    """思考区里写的围栏是草稿,不是工具调用,不该被解析。"""
+    text = "<think>要不要看看目录?```shell\nrm -rf /\n```</think>我换个思路"
+    assert list(iter_from_markdown(text)) == []
+
+
+def test_fence_glued_to_think_close_tag() -> None:
+    """kimi 实际输出:</think> 和开栏挤在同一行 —— 剥掉 think 后围栏落到行首。"""
+    text = "<think>需要搜索天气。</think>```websearch.search\n今天 上海市宝山区 天气\n```"
+    blocks = list(iter_from_markdown(text))
+    assert len(blocks) == 1
+    assert blocks[0].lang == "websearch.search"
+    assert blocks[0].content == "今天 上海市宝山区 天气"
+
+
+def test_unclosed_think_parses_nothing() -> None:
+    """思考区没闭合 = 还在生成中,整体不解析(防止执行半截内容)。"""
+    assert list(iter_from_markdown("<think>想想 ```shell\necho 半截\n```")) == []
+
+
+def test_thinking_tag_variant() -> None:
+    """Gemini 用 <thinking>...</thinking>,同样要剥。"""
+    text = "<thinking>草稿</thinking>\n```shell\nls\n```"
+    blocks = list(iter_from_markdown(text))
+    assert len(blocks) == 1
+    assert blocks[0].content == "ls"

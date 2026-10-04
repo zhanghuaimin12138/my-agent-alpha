@@ -64,6 +64,12 @@ def test_streaming_fence_requires_blank_line() -> None:
     assert len(list(iter_from_markdown(no_blank))) == 1
 
 
+def test_streaming_unclosed_think_no_early_stop() -> None:
+    """思考区里出现的围栏不算完整调用:think 没闭合前不能触发流式早停。"""
+    generating = "<think>举例 ```shell\nls\n```\n再想想"
+    assert list(iter_from_markdown(generating, streaming=True)) == []
+
+
 def test_e2e_break_then_execute(logdir: Path, workspace: Path) -> None:
     set_scripted_replies(
         [

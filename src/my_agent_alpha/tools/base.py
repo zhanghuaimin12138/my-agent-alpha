@@ -32,7 +32,7 @@ import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 
-from my_agent_alpha.codeblock import fenced_regions, iter_from_markdown
+from my_agent_alpha.codeblock import fenced_regions, iter_from_markdown, strip_think
 from my_agent_alpha.message import DECLINED_CONTENT, Message
 
 # 所有工具的执行函数长这一个样子:
@@ -293,11 +293,16 @@ class ToolUse:
         - 原生通道:@工具名(编号): {参数} 行,参数 JSON 没闭合就先忽略
           (流式生成到一半是正常现象,这本身就是"流式安全"的);
           围栏代码块里面写的 @xxx 只是示例,不算调用;
+        - 两个通道都先剥掉 <think>...</think> 思考区(gptme 的做法):
+          思考里写的围栏/@调用是草稿,不算真调用;
         - streaming=True 只在流式检查时使用:代码块的 ``` 闭合后还要
           跟一个空行才算数(更严,防止执行半截命令),详见 codeblock 模块说明。
         """
         from my_agent_alpha.tools import get_tool, get_tool_for_langtag  # 延迟导入避免循环依赖
 
+        # 先剥思考区:think 里写的围栏/@调用是草稿,不算真调用;
+        # 粘在 </think> 后面的围栏剥完落到行首,markdown 通道才看得见
+        content = strip_think(content)
         found: list[ToolUse] = []
 
         for cb in iter_from_markdown(  # list[codeBlock]

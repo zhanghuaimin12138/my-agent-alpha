@@ -40,6 +40,23 @@ def test_unterminated_fence_not_executed() -> None:
     assert list(ToolUse.iter_from_content(content)) == []
 
 
+# ---- 思考区剥离在工具层的回归(kimi 粘连格式曾静默丢失调用)----
+
+
+def test_native_call_inside_think_ignored() -> None:
+    """思考区里的 @原生调用行是示例/草稿,不解析(修复前会被当成真调用执行)。"""
+    content = '<think>比如 @save(call_x): {"path": "a.txt", "content": "x"}</think>我想想'
+    assert list(ToolUse.iter_from_content(content)) == []
+
+
+def test_think_glued_fence_still_executes(workspace: Path) -> None:
+    """端到端回归:围栏粘在 </think> 后面同一行,工具照样要执行出结果。"""
+    msg = Message("assistant", "<think>先打个招呼。</think>```shell\necho hi\n```")
+    results = execute_msg(msg)
+    assert len(results) == 1
+    assert "hi" in results[0].content
+
+
 def test_execute_error_becomes_system_message() -> None:
     def boom(code, args, kwargs):  # type: ignore[no-untyped-def]
         raise RuntimeError("炸了")
