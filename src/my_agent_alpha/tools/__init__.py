@@ -10,9 +10,11 @@ from contextvars import ContextVar
 from dataclasses import replace
 
 from my_agent_alpha.message import INTERRUPT_CONTENT, Message
+from my_agent_alpha.tools import memory as memory_mod
 from my_agent_alpha.tools import read as read_mod
 from my_agent_alpha.tools import save as save_mod
 from my_agent_alpha.tools import shell as shell_mod
+from my_agent_alpha.tools import subagent as subagent_mod
 from my_agent_alpha.tools.base import ToolSpec, ToolUse
 
 # 已加载的工具列表存在 ContextVar 里(而不是全局变量):
@@ -20,7 +22,7 @@ from my_agent_alpha.tools.base import ToolSpec, ToolUse
 _tools_var: ContextVar[tuple[ToolSpec, ...] | None] = ContextVar("alpha_tools", default=None)
 
 # 内置工具模块(每个模块暴露模块级 tool / 多个 tool)
-_BUILTIN_MODULES = (shell_mod, read_mod, save_mod)
+_BUILTIN_MODULES = (shell_mod, read_mod, save_mod, memory_mod, subagent_mod)
 
 
 def _collect_builtins() -> tuple[ToolSpec, ...]:
@@ -42,6 +44,19 @@ def init_tools() -> None:
 def clear_tools() -> None:
     """清空注册表(测试之间重置状态用)。"""
     _tools_var.set(None)
+
+
+def add_tools(specs: tuple[ToolSpec, ...]) -> None:
+    """往注册表追加工具(按名字去重)。
+
+    用途:阶段 8 的 MCP —— 连上外部服务器后,把远端工具包成本地
+    ToolSpec 追加进来(先 init_tools 保证内置表就位)。
+    """
+    init_tools()
+    current = _tools_var.get() or ()
+    existing = {t.name for t in current}
+    merged = current + tuple(t for t in specs if t.name not in existing)
+    _tools_var.set(merged)
 
 
 def get_tools() -> tuple[ToolSpec, ...]:

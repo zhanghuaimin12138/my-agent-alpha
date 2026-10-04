@@ -24,10 +24,12 @@ import logging
 import os
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from typing import Any
 
 from my_agent_alpha.commands import builtin as builtin_commands
 from my_agent_alpha.commands import execute_cmd
 from my_agent_alpha.compaction import compact_messages, get_context_budget
+from my_agent_alpha.config import Config
 from my_agent_alpha.confirm import (
     ConfirmationResult,
     clear_confirm_hooks,
@@ -35,7 +37,7 @@ from my_agent_alpha.confirm import (
     register_confirm_hook,
     set_auto_confirm,
 )
-from my_agent_alpha.context import agent_context, get_logdir
+from my_agent_alpha.context import agent_context, get_logdir, set_current_model
 from my_agent_alpha.hooks import HookType, trigger_hook
 from my_agent_alpha.hooks import builtin as builtin_hooks
 from my_agent_alpha.llm import ContextLengthError, reply, resolve_model
@@ -47,7 +49,7 @@ from my_agent_alpha.message import (
     Message,
 )
 from my_agent_alpha.prompts import get_prompt
-from my_agent_alpha.tools import execute_msg, get_tools
+from my_agent_alpha.tools import add_tools, execute_msg, get_tools
 from my_agent_alpha.tools.base import ToolUse
 from my_agent_alpha.tools.shell_safety import guardrail_hook, readonly_hook
 
@@ -422,6 +424,17 @@ def chat(
 
     返回 LogManager,测试用它检查日志内容;正常调用可以忽略返回值。
     """
+    # MCP:配置了外部服务器就连上,远端工具转成本地 ToolSpec(gptme 同款)
+    mcp_clients: list[Any] = []
+    config = Config.load(workspace)
+    if config.mcp_servers:
+        from my_agent_alpha.mcp_client import create_mcp_tools
+
+        specs, mcp_clients = create_mcp_tools(config.mcp_servers)
+        if specs:
+            add_tools(specs)  # 内置表基础上追加(名字带"服务器."前缀,不会撞)
+            print(f"(MCP:已接入 {len(specs)} 个远端工具)")
+
     tools = get_tools()
     # 确保内置钩子/命令就位(同名重注册=替换,幂等)。
     # 注意:不清别人的钩子!调用方在会话前注册的自定义钩子必须存活;
@@ -437,21 +450,32 @@ def chat(
             tools, native=tool_format == "tool"
         ):  #  拿到工具使用说明（system message）
             manager.append(msg, sync=True)
+        # 长期记忆索引:有记忆才注入(gptme 的做法,64KB 预算)
+        from my_agent_alpha.memory_store import render_memory_index
+
+        mem_index = render_memory_index(workspace)
+        if mem_index:
+            manager.append(Message("system", mem_index, pinned=True, hide=True))
     else:
         # 恢复会话:回放已打印的历史
         for msg in manager.messages:
             _print_message(msg)
 
-    with agent_context(workspace, logdir):
-        _dispatch_hooks(manager, HookType.SESSION_START, model=model)
-        try:
-            _run_chat_loop(
-                manager,
-                list(prompts),
-                model,
-                non_interactive=non_interactive,
-                tool_format=tool_format,
-            )
-        finally:
-            _dispatch_hooks(manager, HookType.SESSION_END)
+    try:
+        with agent_context(workspace, logdir):
+            set_current_model(model)  # subagent 工具会继承这个模型
+            _dispatch_hooks(manager, HookType.SESSION_START, model=model)
+            try:
+                _run_chat_loop(
+                    manager,
+                    list(prompts),
+                    model,
+                    non_interactive=non_interactive,
+                    tool_format=tool_format,
+                )
+            finally:
+                _dispatch_hooks(manager, HookType.SESSION_END)
+    finally:
+        for client in mcp_clients:
+            client.close()  # 收掉 MCP 子进程
     return manager

@@ -30,12 +30,30 @@ PROJECT_CONFIG_FILENAME = "alpha.toml"
 
 
 @dataclass(frozen=True)
+class McpServer:
+    """一个 MCP 服务器的启动配置单(stdio 模式:拉起一个子进程,用它的工具)。
+
+    对应 alpha.toml 里的:
+        [[mcp.servers]]
+        name = "weather"
+        command = "python"
+        args = ["-m", "weather_server"]
+    """
+
+    name: str  # 起的名字
+    command: str  # 用什么程序启动
+    args: tuple[str, ...] = ()  # 启动时传递的参数
+    env: dict[str, str] | None = None  # 启动时给他的环境变量
+
+
+@dataclass(frozen=True)
 class Config:
     """读取并合并好的配置。值为 None 表示"这一层没配",用代码默认值。"""
 
     model: str | None = None
     tool_format: str | None = None
     max_steps: int | None = None
+    mcp_servers: tuple[McpServer, ...] = ()
 
     @classmethod
     def load(cls, workspace: Path, user_config_dir: Path | None = None) -> Config:
@@ -53,7 +71,32 @@ class Config:
             model=_as_str(merged.get("model")),
             tool_format=_as_str(merged.get("tool_format")),
             max_steps=_as_int(merged.get("max_steps")),
+            mcp_servers=_parse_mcp_servers(merged.get("mcp")),
         )
+
+
+def _parse_mcp_servers(raw: object) -> tuple[McpServer, ...]:
+    """解析 [mcp] 表下的 servers 列表;格式不对的条目跳过并告警。"""
+    if not isinstance(raw, dict):
+        return ()
+    servers_raw = raw.get("servers")
+    if not isinstance(servers_raw, list):
+        return ()
+    servers: list[McpServer] = []
+    for item in servers_raw:
+        if not isinstance(item, dict) or "name" not in item or "command" not in item:
+            logger.warning("忽略不完整的 mcp.servers 条目(需要 name 和 command):%r", item)
+            continue
+        env = item.get("env") if isinstance(item.get("env"), dict) else None
+        servers.append(
+            McpServer(
+                name=str(item["name"]),
+                command=str(item["command"]),
+                args=tuple(str(a) for a in item.get("args", [])),
+                env={str(k): str(v) for k, v in env.items()} if env else None,
+            )
+        )
+    return tuple(servers)
 
 
 def _read_toml(path: Path) -> dict[str, object]:

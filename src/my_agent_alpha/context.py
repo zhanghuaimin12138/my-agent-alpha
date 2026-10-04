@@ -16,6 +16,7 @@ from pathlib import Path
 
 _workspace_var: ContextVar[Path | None] = ContextVar("alpha_workspace", default=None)
 _logdir_var: ContextVar[Path | None] = ContextVar("alpha_logdir", default=None)
+_model_var: ContextVar[str | None] = ContextVar("alpha_model", default=None)
 
 
 def get_workspace() -> Path:
@@ -36,6 +37,16 @@ def get_logdir() -> Path | None:
 def set_logdir(path: Path | None) -> None:
     """设置当前会话目录。"""
     _logdir_var.set(path)
+
+
+def get_current_model() -> str | None:
+    """当前会话用的模型(subagent 工具继承它,不传就用父会话同款)。"""
+    return _model_var.get()
+
+
+def set_current_model(model: str) -> None:
+    """设置当前模型(chat() 会话开始时设一次)。"""
+    _model_var.set(model)
 
 
 @contextmanager

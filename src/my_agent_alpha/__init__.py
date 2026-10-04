@@ -65,6 +65,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     from my_agent_alpha.dirs import get_logs_dir
 
+    prompts = list(args.prompts)
+    if prompts == ["-"]:  # "-" = 从标准输入读提示词(给 subagent 用,防超长参数)
+        prompts = [sys.stdin.read()]
+
     config = Config.load(args.workspace)
     model = effective_model(args.model, config)
     tool_format = effective_tool_format(args.tool_format, config)
@@ -76,7 +80,7 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         chat(
-            args.prompts,
+            prompts,
             logdir=logdir,
             workspace=args.workspace,
             model=model,

@@ -9,8 +9,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from my_agent_alpha.commands import CommandContext, command
+from my_agent_alpha.context import get_workspace
 from my_agent_alpha.hooks import get_hooks
+from my_agent_alpha.memory_store import list_memories
 from my_agent_alpha.tools import get_tools
 
 # 命令注册
@@ -67,6 +71,25 @@ def hooks_cmd(ctx: CommandContext) -> None:
         return
     for h in sorted(hooks, key=lambda x: (-x.priority, x.name)):
         print(f"  [{h.hook_type.value}] {h.name}(优先级 {h.priority})")
+
+
+@command("memory", "mem")
+def memory_cmd(ctx: CommandContext) -> None:
+    """/memory(别名 /mem):查看长期记忆;/memory show <名> 看某条全文。"""
+    if ctx.args and ctx.args[0] == "show" and len(ctx.args) > 1:
+        name = ctx.args[1]
+        for entry in list_memories(get_workspace() or Path.cwd()):
+            if entry.name == name:
+                print(entry.path.read_text(encoding="utf-8"))
+                return
+        print(f"  没有叫 {name!r} 的记忆")
+        return
+    entries = list_memories(get_workspace() or Path.cwd())
+    if not entries:
+        print("  (还没有长期记忆;让模型用 memory 工具记一条)")
+        return
+    for entry in entries:
+        print(f"  {entry.name:<20} {entry.title}  [{entry.path.parent}]")
 
 
 def register_builtin_commands() -> None:
