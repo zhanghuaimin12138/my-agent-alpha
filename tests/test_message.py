@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from my_agent_alpha.message import Message, utcnow
+from my_agent_alpha.message import Message, clean_bad_unicode, utcnow
 
 
 def test_minimal_to_dict_only_writes_required_fields() -> None:
@@ -113,3 +113,9 @@ def test_metadata_defensive_copy() -> None:
 def test_from_dict_non_dict_raises() -> None:
     with pytest.raises(ValueError, match="JSON 对象"):
         Message.from_dict("not a dict")  # type: ignore[arg-type]
+
+
+def test_clean_bad_unicode() -> None:
+    """落单代理字符(终端坏字节的解码残渣)换成 ?;正常字符(含合法表情)原样保留。"""
+    assert clean_bad_unicode("\ud83c有雨吗") == "?有雨吗"
+    assert clean_bad_unicode("正常中文🌧️") == "正常中文🌧️"

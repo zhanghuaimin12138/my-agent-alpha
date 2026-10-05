@@ -74,6 +74,21 @@ def test_native_unclosed_json_skipped() -> None:
     assert list(ToolUse.iter_from_content(content)) == []
 
 
+def test_native_call_id_with_dot_parsed() -> None:
+    """调用编号带点号也必须认(dashscope/kimi 的编号格式,真机实录踩坑)。
+
+    dashscope 给的编号长这样 "shell.0_a475cfc6"(工具名_序号_哈希),
+    编号字符集若不许点号,整行识别失败、调用被静默丢弃
+    (真机会话 2026-1005-332a08 两次调用全部无结果,见踩坑记录条目 5)。
+    """
+    content = '我来查询:\n@shell(shell.0_a475cfc6): {"command": "echo hi"}'
+    uses = list(ToolUse.iter_from_content(content))
+    assert len(uses) == 1
+    assert uses[0].tool.name == "shell"
+    assert uses[0].call_id == "shell.0_a475cfc6"  # 编号原样保留(配对回传要用)
+    assert uses[0].kwargs == {"command": "echo hi"}
+
+
 def test_native_inside_fence_is_example_not_call() -> None:
     content = (
         '示范写法:\n```\n@save(call_1): {"path": "a"}\n```\n'

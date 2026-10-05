@@ -151,7 +151,10 @@ class ToolSpec:
 
 
 # 匹配原生调用行的开头,如 "@save(call_abc123):"
-_NATIVE_CALL_RE = re.compile(r"@([A-Za-z0-9_.\-]+)\(([A-Za-z0-9_\-]*)\)\s*:")
+# 编号字符集必须允许点号:有的服务商(dashscope/kimi)给的调用编号长这样
+# "websearch.search_0_a475cfc6"(工具名_序号_哈希,工具名本身带点),
+# 不许点号会导致整行识别失败、调用被静默丢弃(踩坑记录条目 5)
+_NATIVE_CALL_RE = re.compile(r"@([A-Za-z0-9_.\-]+)\(([A-Za-z0-9_.\-]*)\)\s*:")
 
 
 def find_json_end(text: str, brace_start: int) -> int:
@@ -264,7 +267,9 @@ class ToolUse:
         except KeyboardInterrupt:
             raise  # 中断必须向上传播,不被吞成错误消息
         except Exception as e:
-            yield Message("system", f"工具 {self.tool.name} 执行失败: {e}")
+            # 带上异常类型名:有的异常(如 TimeoutError)str() 是空字符串,
+            # 只拼 {e} 会得到"执行失败: "后面一片空白,模型无从判断死因
+            yield Message("system", f"工具 {self.tool.name} 执行失败: {type(e).__name__}: {e}")
 
     def with_edited_content(self, edited: str) -> ToolUse:
         """返回一个"主参数被改写"的新调用(消息不可变,造新的)。
@@ -310,7 +315,7 @@ class ToolUse:
         ):  # markdown代码块解析出codeblock类
             tool = get_tool_for_langtag(cb.lang)  # 通过lang->toolSpec
             if tool is not None:
-                found.append(  # 得到toolUser
+                found.append(  # 得到toolUse
                     cls(
                         tool=tool,
                         args=[cb.args] if cb.args else None,

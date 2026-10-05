@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from my_agent_alpha import LogManager, Message
 from my_agent_alpha.chat import has_runnable_tooluse
 from my_agent_alpha.llm.mock import set_scripted_replies
@@ -167,3 +169,13 @@ def test_resume_session_reuses_log(logdir: Path, workspace: Path) -> None:
     # 系统提示词只种了一次
     system_prompt_count = sum(1 for m in manager.messages if m.hide and m.role == "system")
     assert system_prompt_count == 2  # static + dynamic 两条
+
+
+def test_user_input_bad_unicode_cleaned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """终端传来坏字符(落单代理)时入口先清洗,不让它进日志把程序写崩。"""
+    from my_agent_alpha.chat import _get_user_input
+
+    monkeypatch.setattr("builtins.input", lambda _: "\ud800有雨吗")
+    msg = _get_user_input()
+    assert msg is not None
+    assert msg.content == "?有雨吗"

@@ -26,7 +26,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
 
-from my_agent_alpha.message import Message
+from my_agent_alpha.message import Message, clean_bad_unicode
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +45,16 @@ def _jsonl_line(msg: Message) -> bytes:
     """把一条消息转成"一行 JSON + 换行符"的字节(写入文件的最小单位)。
 
     ensure_ascii=False:中文直接写中文,人打开文件就能读;
-    default=str:metadata 里万一混进奇怪对象,降级成字符串,不让一条消息毁掉整个写入。
+    default=str:metadata 里万一混进奇怪对象,降级成字符串,不让一条消息毁掉整个写入;
+    errors="replace":内容里万一混进编码不了的"落单代理字符"(终端/接口传来的坏字节),
+    换成 ? 继续写 —— 日志是唯一状态,宁可一个字符变 ? 也不能让程序崩掉丢整段对话。
     """
-    return json.dumps(msg.to_dict(), ensure_ascii=False, default=str).encode("utf-8") + b"\n"
+    return (
+        clean_bad_unicode(json.dumps(msg.to_dict(), ensure_ascii=False, default=str)).encode(
+            "utf-8"
+        )
+        + b"\n"
+    )
 
 
 def _fsync_directory(path: Path) -> None:  # 目录（os层面：目录=文件）文件强制落盘

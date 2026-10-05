@@ -37,6 +37,19 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def clean_bad_unicode(text: str) -> str:
+    """把文本里编码不了的"落单代理字符"换成 ?,保证 utf-8 写入永不崩溃。
+
+    这种字符正常文本里不会有,来源通常是终端输入法/剪贴板传来的坏字节。
+    不清理的话,写日志时 encode("utf-8") 会抛 UnicodeEncodeError,
+    整个会话直接崩溃退到系统提示符(2026-10-05 实测:用户输入混入坏表情序列)。
+
+    示例:clean_bad_unicode("\\ud83c有雨吗") → "?有雨吗"
+    (合法表情在 Python 里本来就是完整字符,不受这个函数影响)
+    """
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
 @dataclass(frozen=True)
 class Message:
     """一条消息。对话里的所有内容(用户输入、模型回复、工具输出)都是它。

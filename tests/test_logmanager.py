@@ -34,6 +34,20 @@ def test_append_creates_jsonl(logdir: Path) -> None:
     assert "列出当前目录" in lines[0]
 
 
+def test_surrogate_chars_do_not_crash_write(logdir: Path) -> None:
+    """消息里混进编码不了的"落单代理字符"也不许崩,坏字符换成 ? 继续写。
+
+    2026-10-05 实测:终端传来坏表情序列,append 写盘时 UnicodeEncodeError
+    直接把整个程序打死。日志是唯一状态,宁可丢一个字符,不丢整个会话。
+    """
+    manager = LogManager.load(logdir, create=True)
+    manager.append(Message("user", "\ud83c有雨吗"))  # \ud83c = 落单代理字符(坏字节残渣)
+    # append 内部就写盘:不抛异常即为通过
+    line = (logdir / "conversation.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    assert "有雨吗" in line
+    assert "\ud83c" not in line  # 坏字符已被换成 ?
+
+
 def test_reload_recovers_after_restart(logdir: Path) -> None:
     manager = LogManager.load(logdir, create=True)
     for i in range(5):

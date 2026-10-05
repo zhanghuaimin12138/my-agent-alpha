@@ -14,6 +14,11 @@
     没有 → 这个回合结束,回到提示符等用户输入。
 不需要任何额外的状态变量,翻日志就知道该不该继续。
 
+中层还有一道"补发提醒"兜底(missed_tooluse_reason):回合即将结束、
+但最后一条回复像是"本想调工具却没写成"(比如只输出了思考、正文为空),
+就追加一条提醒消息再生成一轮,有次数上限;超限就如实报告并结束回合。
+继续判定的规则本身没动 —— 治的只是"模型忘写代码块时全程静默"这个坑。
+
 阶段 1-2 刻意省略:hook 系统(阶段 5)、上下文压缩(阶段 6)、
 更精细的中断控制、provider 分级重试。
 """
@@ -22,10 +27,12 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
+from my_agent_alpha.codeblock import fenced_regions, iter_from_markdown, strip_think
 from my_agent_alpha.commands import builtin as builtin_commands
 from my_agent_alpha.commands import execute_cmd
 from my_agent_alpha.compaction import compact_messages, get_context_budget
@@ -47,15 +54,20 @@ from my_agent_alpha.message import (
     INTERRUPT_CONTENT,
     LLM_REQUEST_FAILED_PREFIX,
     Message,
+    clean_bad_unicode,
 )
 from my_agent_alpha.prompts import get_prompt
-from my_agent_alpha.tools import add_tools, execute_msg, get_tools
+from my_agent_alpha.tools import add_tools, execute_msg, get_tool_for_langtag, get_tools
 from my_agent_alpha.tools.base import ToolUse
 from my_agent_alpha.tools.shell_safety import guardrail_hook, readonly_hook
 
 logger = logging.getLogger(__name__)
 
 MAX_STEPS = int(os.environ.get("ALPHA_MAX_STEPS", "50"))
+
+# 一个回合里最多"提醒模型补发工具调用"几次(防模型反复空回复把回合拖成拉锯;
+# 和 MAX_STEPS 同一层面的保险丝,可用环境变量 ALPHA_MAX_TOOL_NUDGES 调)
+MAX_TOOL_NUDGES = int(os.environ.get("ALPHA_MAX_TOOL_NUDGES", "1"))
 
 # ---- 内层:一轮"问模型 + 执行工具" ----
 
@@ -123,6 +135,131 @@ def has_runnable_tooluse(messages: Sequence[Message]) -> bool:
         if msg.role == "assistant":
             return any(tu.is_runnable for tu in ToolUse.iter_from_content(msg.content))
     return False
+
+
+# 提醒消息的开头标记:在日志/终端里一眼能认出"这是补发提醒"(也方便测试定位)
+NUDGE_PREFIX = "[工具调用提醒]"
+
+# "行动宣告"关键词:正文里出现这些词、又没有任何代码块,大概率是模型在
+# 说"我要开始干活了"却没写调用(真机实录:"我来帮你查一下上海今天的天气。")。
+# 只收"我 + 动作"的词;刻意不收"帮你/帮您/试试"这类太常见的词 ——
+# 真机复测里"我可以帮你做这些事:"(能力介绍)、"需要我帮你找找吗?"
+# (主动提议)都是正常最终回答,收了必误报(误报代价是多跑一轮生成)
+_ANNOUNCE_MARKERS = ("我来", "让我", "我去", "这就", "马上", "稍等", "let me", "i'll ")
+
+# 宽松版"疑似原生调用行"探测器:@工具名(随便什么编号): { 开头。
+# 比严格解析的 _NATIVE_CALL_RE 宽(不限制编号字符集):严格解析失败、
+# 宽松探测却命中 = 回复里明明有调用行只是没被认出来 —— 该提醒而不是装没看见。
+# (真机实录:dashscope 的编号带点号,曾让严格正则整行失配,调用静默丢失)
+_LOOSE_NATIVE_CALL_RE = re.compile(r"@[A-Za-z0-9_.\-]+\([^)]*\)\s*:\s*\{")
+
+
+def _resembles_known_tool(langtag: str) -> bool:
+    """判断一个围栏语言标记是不是"某个已知工具名写岔了的近亲"。
+
+    示例:工具叫 websearch.search,模型写 ```websearch —— 把工具名按点号
+    拆成段(websearch / search),标记恰好是其中一段,说明模型想调这个
+    工具、只是名字没写全,值得提醒它重写;
+    ```python、```json 这类和任何工具名都不沾边的,只是普通示例代码,不打扰。
+
+    示例:
+        _resembles_known_tool("websearch")  → True(工具 websearch.search 的前段)
+        _resembles_known_tool("python")     → False(谁也不是)
+    """
+    tag = langtag.lower()
+    return any(tag in {t.name.lower(), *t.name.lower().split(".")} for t in get_tools())
+
+
+def missed_tooluse_reason(messages: Sequence[Message]) -> str | None:
+    """检查"最后一条模型回复":没解析出工具调用,是不是"本想调却没写成"?
+
+    有问题返回一句给人看的原因(会拼进提醒消息),没问题返回 None。
+    只在回合即将因此结束时调用 —— 正常的最终回答不该被打扰。
+
+    覆盖五种真实踩过的坑(真机实录见 docs/tmp.jsonl 与踩坑记录条目 4/5):
+    1. 正文为空:整个回复只有 <think> 思考(思考里甚至写着"我来调用工具"),
+       或干脆一个字都没有 —— 模型把"打算调用"当成了"已经调用";
+    2. 围栏写了,语言标记却不认识:如工具叫 websearch.search、模型写
+       ```websearch —— 这种块会被解析器静默忽略,不提醒就永远没人发现;
+    3. 正文以冒号结尾(如"现在为您查询:"):话说一半戛然而止,
+       典型的"要说接下来执行什么,结果代码块忘写了";
+    4. 行动宣告(真机实录"我来帮你查一下上海今天的天气。"):说要干活
+       但没带冒号、也没写代码块 —— 只要正文一个围栏都没有、又出现
+       "我来/帮你/稍待"这类词,就值得提醒一次;
+    5. 疑似原生调用行没被解析出来:回复里有 "@工具名(编号): {" 形态
+       (宽松探测),严格解析却一个调用都没得到 —— 说明编号或参数写得
+       不合规,该提醒而不是装没看见。
+
+    示例:
+        missed_tooluse_reason([Message("assistant", "<think>我想搜索</think>")])
+        → "回复没有正文(只有思考过程或完全为空)"
+        missed_tooluse_reason([Message("assistant", "任务完成")]) → None
+    """
+    content = next((m.content for m in reversed(messages) if m.role == "assistant"), None)
+    if content is None:
+        return None
+    body = strip_think(content).strip()
+    if not body:
+        # 不用括号:这段话会被拼进提醒消息的括号里,嵌套括号看着难受
+        return "回复没有正文,只有思考过程或完全为空"
+    has_fence = "```" in body  # 有没有围栏代码块(检测器多个分支都要用)
+    for cb in iter_from_markdown(body):
+        if cb.lang and get_tool_for_langtag(cb.lang) is None and _resembles_known_tool(cb.lang):
+            return f"代码块标记 ```{cb.lang} 不是任何已知工具的名字"
+    if not has_fence and any(m in body.lower() for m in _ANNOUNCE_MARKERS):
+        return '回复在宣布要执行操作(如"我来……"),却没有工具调用代码块'
+    # 围栏里的 @xxx 只是文档示例,探测前先把围栏区域盖掉
+    if _LOOSE_NATIVE_CALL_RE.search(_blank_fences(body)):
+        return "回复里有工具调用行,但没有被解析出来(工具名、调用编号或参数格式不合规)"
+    # 两种冒号都要认:ASCII 的 ":" 和全角的 "："(中文模型爱用全角,
+    # 真实翻车样本 docs/tmp.jsonl 第 6 条就是全角冒号结尾)
+    if body.endswith((":", "：")):
+        return '回复以冒号结尾,像是要说"接下来执行什么",代码块却没写'
+    return None
+
+
+def _blank_fences(text: str) -> str:
+    """把文本里围栏代码块的内容整体换成空白(保留长度,围栏外原样)。
+
+    用途:检测"疑似原生调用行"时,得跳过围栏里的示例 —— 文档示例里写
+    "@save(call_x): {...}" 很正常,那不是真调用。fenced_regions 给出
+    围栏区间后,把区间内的字符逐个换成空格即可。
+
+    示例:"a ```x\n@t(i): {}\n``` b" → "a      \n          \n   b"
+    """
+    regions = fenced_regions(text)
+    if not regions:
+        return text
+    chars = list(text)
+    for a, b in regions:
+        for i in range(a, min(b, len(chars))):
+            if chars[i] != "\n":  # 换行保留,防止把两段挤到"同一行"
+                chars[i] = " "
+    return "".join(chars)
+
+
+def _make_nudge(reason: str, tool_format: str) -> Message:
+    """构造一条提醒模型"补上工具调用"的 system 消息。
+
+    它会进日志、发给模型、也打印到终端 —— 踩坑记录的教训:"该有调用
+    却解析出 0 个"这种事绝不能静默,用户和模型都得看见。
+    两种通道措辞不同:markdown 通道教围栏写法,原生通道提醒用函数调用。
+    """
+    if tool_format == "markdown":
+        how = (
+            "正确写法是输出围栏代码块,语言标记 = 工具名,例如:\n"
+            "```shell\nls -la\n```\n"
+            "带参数的工具把参数写在工具名后面,例如 ```save path/to/file.txt。"
+        )
+    else:
+        how = "请直接发起对应的函数调用(function calling),不要只用文字描述。"
+    return Message(
+        "system",
+        f"{NUDGE_PREFIX} 你上一条回复没有产生任何工具调用({reason})。"
+        '只在思考里"打算调用"、或只用文字描述要做什么,工具都不会执行。'
+        f"{how}"
+        "如果任务确实无需工具,请直接给出完整的最终回答(不要停在半句话上)。",
+    )
 
 
 # ---- 中层:处理一条用户输入 ----
@@ -210,8 +347,16 @@ def _process_message_conversation(
 
     模型的回复文字在流式过程中已经打印过了,这里不再重复打印;
     工具输出等其他消息由 _print_message 打印。
+
+    结束前的兜底(见 missed_tooluse_reason):模型没写任何可执行调用、
+    但回复像是"本想调工具却没写成"时,追加一条提醒消息再生成一轮
+    (最多 MAX_TOOL_NUDGES 次);超限就如实报告并结束 —— 绝不静默吞掉。
+    提醒额度不是"整回合一份":模型只要真的写出并执行过调用(哪怕工具
+    报错),额度就重新计数 —— 模型已经证明会写,后面再漏写值得再提醒一次
+    (真机实录:提醒恢复 → 工具超时 → 模型想换个方式重试却因额度用完被掐死)。
     """
     steps = 0
+    nudges = 0  # 当前这段"漏写序列"已用的提醒次数(执行过调用就清零)
     while True:
         _dispatch_hooks(manager, HookType.STEP_PRE, model=model)
         printer = _StreamPrinter()
@@ -240,8 +385,27 @@ def _process_message_conversation(
         if steps >= MAX_STEPS:
             manager.append(Message("system", f"已达到单 turn 最大步数({MAX_STEPS}),停止。"))
             return
-        if not has_runnable_tooluse(manager.messages):
+        if has_runnable_tooluse(manager.messages):
+            nudges = 0  # 真的执行了调用:漏写序列结束,提醒额度重新计数
+            continue  # 带着工具结果再问一轮(继续判定规则:只看最后一条回复)
+        reason = missed_tooluse_reason(manager.messages)
+        if reason is None:
+            return  # 正常收尾:模型给了完整的最终回答
+        if nudges >= MAX_TOOL_NUDGES:
+            # 提醒过仍不写(或没配提醒额度):写明原因再结束,不留静默失败
+            tried = f"经 {nudges} 次提醒仍" if nudges else ""
+            notice = Message(
+                "system",
+                f"{NUDGE_PREFIX} 模型{tried}未输出工具调用({reason}),本回合结束。",
+            )
+            manager.append(notice)
+            _print_message(notice)
             return
+        nudges += 1
+        nudge = _make_nudge(reason, tool_format)
+        manager.append(nudge)
+        _print_message(nudge)
+        # 提醒后继续循环;下一轮还是只看新回复里有没有可执行调用
 
 
 # ---- 钩子分发:生命周期的统一出口 ----
@@ -340,7 +504,10 @@ def _get_user_input() -> Message | None:
             print("(Ctrl-C;Ctrl-D 退出)")
             continue
         if content.strip():
-            return Message("user", content)
+            # 终端偶尔会传来坏字节(输入法/粘贴的表情序列坏掉),解码后留下
+            # 编码不了的"落单代理字符"——不清理的话,这条消息写日志时会把
+            # 整个程序写崩(2026-10-05 实测)。入口处先洗一遍,坏字符换 ?
+            return Message("user", clean_bad_unicode(content))
 
 
 def _print_message(msg: Message) -> None:
@@ -385,10 +552,12 @@ def _run_chat_loop(
         if content.startswith("/") and execute_cmd(content, manager, model):
             continue
 
-        manager.append(Message("user", content))
-        _print_message(Message("user", content))
-        _dispatch_hooks(manager, HookType.TURN_PRE, content=content)
+        # append/钩子也纳入 try:任何一条消息的存储问题都不该打死 REPL
+        # (日志层已对坏字符兜底,这里是最后一道网)
         try:
+            manager.append(Message("user", content))
+            # _print_message(Message("user", content))
+            _dispatch_hooks(manager, HookType.TURN_PRE, content=content)
             _process_message_conversation(manager, model, tool_format)
         except KeyboardInterrupt:
             # 中断发生在模型生成期间(工具执行期间的中断由 execute_msg 收尾)
@@ -435,7 +604,8 @@ def chat(
             add_tools(specs)  # 内置表基础上追加(名字带"服务器."前缀,不会撞)
             print(f"(MCP:已接入 {len(specs)} 个远端工具)")
 
-    tools = get_tools()
+    tools = get_tools()  # 拿到全部工具
+
     # 确保内置钩子/命令就位(同名重注册=替换,幂等)。
     # 注意:不清别人的钩子!调用方在会话前注册的自定义钩子必须存活;
     # 想清场请显式调 clear_hooks()(测试的 conftest 就是这么做的)。
