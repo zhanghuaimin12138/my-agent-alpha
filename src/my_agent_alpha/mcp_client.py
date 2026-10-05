@@ -33,7 +33,8 @@ from my_agent_alpha.tools.base import Parameter, ToolSpec
 logger = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT = 60.0  # 首次 npx 要下载包,给足时间
-_CALL_TIMEOUT = 60.0
+# 单次工具调用的超时不再用固定常量:从 McpServer.timeout 读(默认 120 秒,
+# 可在 alpha.toml 里按服务器调)—— 搜索/渲染类工具天然偏慢,60 秒一刀切太紧
 
 
 class SyncMCPClient:
@@ -60,6 +61,8 @@ class SyncMCPClient:
             client.list_tools()   # 构造完就能直接用
         """
         self.server = server  # 要连的服务器配置(名字、启动命令、参数、环境变量)
+        # 单次工具调用的超时秒数(来自配置;超时会在"执行侧"取消调用,见下)
+        self.call_timeout: float = float(server.timeout)
 
         # ---- 后台线程:一个专门跑 asyncio 代码的小天地 ----
         # MCP 库的函数都是"会暂停等结果"的风格(async),必须有 asyncio 环境才能跑;
@@ -128,17 +131,21 @@ class SyncMCPClient:
                 while True:  # 循环取队列内容
                     # 从队列里取出一条(取不到就等，会放开当前cpu,继续执行调度员空转函数，
                     # 如果不放开，这个线程就永远阻塞在这了，因为调度员不会再得到cpu，执行调度)
-                    kind, payload, fut = await self._ops.get()
-                    # 类型，参数，空白回执（接受结果用的）
+                    kind, payload, fut, timeout = await self._ops.get()
+                    # 类型，参数，空白回执（接受结果用的），这次操作的超时秒数
 
                     try:
                         if kind == "stop":
                             fut.set_result(None)
                             return  # 结束mcp循环监听
                         if kind == "list":  # list操作，执行mcp的list_tools函数，结果写入fut
-                            fut.set_result(await session.list_tools())
+                            # 超时在"执行侧"生效:到点取消这次调用,而不是主线程干等
+                            # (否则一次挂起的调用会永远占着本协程,堵死同服务器后续所有调用)
+                            fut.set_result(await asyncio.wait_for(session.list_tools(), timeout))
                         elif kind == "call":  # call操作，执行mcp的call_tool函数，结果写入fut
-                            fut.set_result(await session.call_tool(**payload))
+                            fut.set_result(
+                                await asyncio.wait_for(session.call_tool(**payload), timeout)
+                            )
                     except Exception as e:
                         fut.set_exception(e)
         except Exception as e:
@@ -153,21 +160,40 @@ class SyncMCPClient:
             raise RuntimeError(f"MCP 服务器 {self.server.name!r} 未连接")
         fut: concurrent.futures.Future[Any] = concurrent.futures.Future()  # 造空白回执
         put = asyncio.run_coroutine_threadsafe(
-            self._ops.put((kind, payload, fut)), self._loop
+            self._ops.put((kind, payload, fut, timeout)), self._loop
         )  # 把工作单塞进后台的收件箱
         put.result(timeout=5)  # (确认塞进去了)
-        return fut.result(
-            timeout=timeout
-        )  # 主线程(同步世界)停在这里，干等后台(异步世界)把结果写进 fut
+        # 真正的超时由协程里的 asyncio.wait_for 负责(到点取消调用);
+        # 主线程这里只是兜底:万一协程自己卡住收不了尾,也不至于永远挂在这里。
+        # 余量 10 秒 = 取消收尾的时间
+        return fut.result(timeout=timeout + 10.0)  # 同步世界停在这里,等后台把结果写进 fut
+
+    def _op_readable_timeout(self, kind: str, payload: dict[str, Any] | None, what: str) -> Any:
+        """投递操作,并把超时异常翻译成人能看懂的话。
+
+        为什么必须有这一步:TimeoutError 的 str() 是**空字符串**,
+        直接拼进"执行失败: {e}"就成了空白消息 —— 模型和用户都不知道发生了什么
+        (2026-10-04 真实会话踩坑,见 docs/踩坑记录.md 条目 2)。
+        """
+        try:
+            return self._submit(kind, payload, self.call_timeout)
+        except TimeoutError as e:  # asyncio.wait_for 超时和兜底超时都走这里
+            raise RuntimeError(
+                f"MCP 服务器 {self.server.name!r} {what}超时"
+                f"({self.call_timeout:.0f} 秒无响应;可能网络不通或服务器卡住,"
+                f"可在 alpha.toml 里调大该服务器的 timeout)"
+            ) from e
 
     def list_tools(self) -> list[Any]:
         """列出服务器的全部工具(MCP SDK 的 Tool 对象)。"""
-        result = self._submit("list", None, _CALL_TIMEOUT)
+        result = self._op_readable_timeout("list", None, "列出工具")
         return list(getattr(result, "tools", []) or [])
 
     def call(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """调用一个工具,把返回的内容块拼成文本。"""
-        result = self._submit("call", {"name": tool_name, "arguments": arguments}, _CALL_TIMEOUT)
+        result = self._op_readable_timeout(
+            "call", {"name": tool_name, "arguments": arguments}, f"调用工具 {tool_name!r} "
+        )
         parts = [getattr(block, "text", "") for block in getattr(result, "content", []) or []]
         text = "\n".join(p for p in parts if p)
         if getattr(result, "isError", False):
@@ -217,6 +243,7 @@ def _make_spec(client: SyncMCPClient, server: McpServer, remote_tool: object) ->
         or getattr(remote_tool, "inputSchema", None)
         or {}
     )
+    params = _schema_to_parameters(schema if isinstance(schema, dict) else {})
     annotations = getattr(remote_tool, "annotations", None)
     read_only = bool(getattr(annotations, "readOnlyHint", False)) if annotations else False
 
@@ -250,14 +277,58 @@ def _make_spec(client: SyncMCPClient, server: McpServer, remote_tool: object) ->
     return ToolSpec(
         name=name,
         desc=f"[{server.name}] {desc}".strip(),
+        # 说明和示例按参数表自动生成:markdown 通道下模型看不到参数表
+        # (参数表只在原生通道转 JSON Schema 时用),不告诉它参数名,
+        # 它就只能瞎猜 —— 真实会话里 kimi 连猜两次(裸文本、{"q": ...})全错,
+        # 每错一次浪费一整轮交互加一次用户确认
+        instructions=_markdown_instructions(params),
+        examples=_markdown_example(name, params),
         # block_types 决定"markdown 围栏怎么调它":模型写围栏代码块时,
         # 语言标记(工具全名)按它匹配到本工具。之前漏了它 → markdown
         # 通道下 MCP 工具围栏被当普通代码块忽略(实测抓到的 bug)!
         block_types=(name,),
-        parameters=_schema_to_parameters(schema if isinstance(schema, dict) else {}),
+        parameters=params,
         read_only=read_only,
         execute=execute,
     )
+
+
+def _markdown_instructions(params: tuple[Parameter, ...]) -> str:
+    """生成 markdown 通道的调用说明:围栏内容必须是 JSON 参数体 + 参数名清单。
+
+    示例(参数表有一个必填的 query 时):
+        markdown 通道调用:围栏内容写 JSON 参数体(键名必须用下面的参数名):
+        - query(string,必填): Search query
+    """
+    if not params:
+        return "markdown 通道调用:本工具没有参数,围栏内容写空 JSON 即可:`{}`"
+    lines = ["markdown 通道调用:围栏内容写 JSON 参数体(键名必须用下面的参数名):"]
+    for p in params:
+        mark = "必填" if p.required else "可选"
+        hint = f":{p.description}" if p.description else ""
+        lines.append(f"- {p.name}({p.type},{mark}){hint}")
+    return "\n".join(lines)
+
+
+def _markdown_example(name: str, params: tuple[Parameter, ...]) -> str:
+    """按参数表生成一个"可直接照抄"的调用示例围栏(必填参数进示例)。
+
+    示例:工具 websearch.search 有必填参数 query →
+        ```websearch.search
+        {"query": "<query>"}
+        ```
+    """
+    body = {p.name: _placeholder_for(p) for p in params if p.required}
+    return f"```{name}\n{json.dumps(body, ensure_ascii=False)}\n```"
+
+
+def _placeholder_for(param: Parameter) -> object:
+    """给示例参数挑一个占位值:按类型来,让模型一眼看懂该填什么风格。"""
+    if param.type in ("integer", "number"):
+        return 1
+    if param.type == "boolean":
+        return True
+    return f"<{param.name}>"  # 字符串:拿参数名当占位提示,如 "<query>"
 
 
 # 辅助函数

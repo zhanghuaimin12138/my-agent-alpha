@@ -38,12 +38,16 @@ class McpServer:
         name = "weather"
         command = "python"
         args = ["-m", "weather_server"]
+        timeout = 180  # 可选:这个服务器的工具调用超时秒数(默认 120)
     """
 
     name: str  # 起的名字
     command: str  # 用什么程序启动
     args: tuple[str, ...] = ()  # 启动时传递的参数
     env: dict[str, str] | None = None  # 启动时给他的环境变量
+    # 单次工具调用的超时秒数。搜索/渲染网页类工具天然偏慢,默认给足 120 秒;
+    # 可以按服务器调(快服务器调小,慢工具调大)
+    timeout: float = 120.0
 
 
 @dataclass(frozen=True)
@@ -88,12 +92,15 @@ def _parse_mcp_servers(raw: object) -> tuple[McpServer, ...]:
             logger.warning("忽略不完整的 mcp.servers 条目(需要 name 和 command):%r", item)
             continue
         env = item.get("env") if isinstance(item.get("env"), dict) else None
+        raw_timeout = item.get("timeout", 120.0)
+        timeout = float(raw_timeout) if isinstance(raw_timeout, (int, float)) else 120.0
         servers.append(
             McpServer(
                 name=str(item["name"]),
                 command=str(item["command"]),
                 args=tuple(str(a) for a in item.get("args", [])),
                 env={str(k): str(v) for k, v in env.items()} if env else None,
+                timeout=timeout,
             )
         )
     return tuple(servers)

@@ -20,5 +20,14 @@ def add(a: int, b: int) -> int:
     return a + b
 
 
+@server.tool()
+def slow(seconds: float, text: str = "done") -> str:
+    """Sleep then reply — 测试客户端超时用。"""
+    import time
+
+    time.sleep(seconds)
+    return f"slow done: {text}"
+
+
 if __name__ == "__main__":
     server.run()  # 默认 stdio 传输
