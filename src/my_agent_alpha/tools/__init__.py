@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from dataclasses import replace
 
 from my_agent_alpha.message import INTERRUPT_CONTENT, Message
+from my_agent_alpha.tools import edit as edit_mod
 from my_agent_alpha.tools import memory as memory_mod
 from my_agent_alpha.tools import read as read_mod
 from my_agent_alpha.tools import save as save_mod
@@ -22,7 +23,7 @@ from my_agent_alpha.tools.base import ToolSpec, ToolUse
 _tools_var: ContextVar[tuple[ToolSpec, ...] | None] = ContextVar("alpha_tools", default=None)
 
 # 内置工具模块(每个模块暴露模块级 tool / 多个 tool)
-_BUILTIN_MODULES = (shell_mod, read_mod, save_mod, memory_mod, subagent_mod)
+_BUILTIN_MODULES = (shell_mod, read_mod, save_mod, memory_mod, subagent_mod, edit_mod)
 
 
 def _collect_builtins() -> tuple[ToolSpec, ...]:
