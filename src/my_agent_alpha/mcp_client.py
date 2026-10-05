@@ -259,8 +259,8 @@ def _make_spec(client: SyncMCPClient, server: McpServer, remote_tool: object) ->
         参数来源:原生通道给 kwargs;markdown 通道的围栏内容(code)
         按 gptme 的约定是一个 JSON 参数体,如 {"text": "hi"}。
         """
-        arguments = dict(kwargs) if kwargs else {}
-        if not arguments and code:
+        arguments = dict(kwargs) if kwargs else {}  # 原生通道参数在kwargs
+        if not arguments and code:  # markdown参数在code
             try:
                 parsed = json.loads(code)
             except json.JSONDecodeError:
@@ -278,16 +278,12 @@ def _make_spec(client: SyncMCPClient, server: McpServer, remote_tool: object) ->
         name=name,
         desc=f"[{server.name}] {desc}".strip(),
         # 说明和示例按参数表自动生成:markdown 通道下模型看不到参数表
-        # (参数表只在原生通道转 JSON Schema 时用),不告诉它参数名,
-        # 它就只能瞎猜 —— 真实会话里 kimi 连猜两次(裸文本、{"q": ...})全错,
-        # 每错一次浪费一整轮交互加一次用户确认
         instructions=_markdown_instructions(params),
         examples=_markdown_example(name, params),
         # block_types 决定"markdown 围栏怎么调它":模型写围栏代码块时,
-        # 语言标记(工具全名)按它匹配到本工具。之前漏了它 → markdown
-        # 通道下 MCP 工具围栏被当普通代码块忽略(实测抓到的 bug)!
+        # 语言标记(工具全名)按它匹配到本工具。
         block_types=(name,),
-        parameters=params,
+        parameters=params,  # 原生使用
         read_only=read_only,
         execute=execute,
     )
@@ -333,7 +329,24 @@ def _placeholder_for(param: Parameter) -> object:
 
 # 辅助函数
 def _schema_to_parameters(schema: dict[str, Any]) -> tuple[Parameter, ...]:
-    """把 MCP 工具的 JSON Schema 参数表换算成我们的 Parameter 列表。"""
+    """把 MCP 工具的 JSON Schema 参数表换算成我们的 Parameter 列表。
+
+    input_schema={
+        "type": "object",
+        "properties": {
+            "city": {
+                "type": "string",
+                "description": "City name"
+            },
+            "unit": {
+                "type": "string",
+                "enum": ["celsius", "fahrenheit"],
+                "default": "celsius"
+            }
+        },
+        "required": ["city"]
+    }
+    """
     props = schema.get("properties") or {}
     required = set(schema.get("required") or [])
     params = []
@@ -349,3 +362,54 @@ def _schema_to_parameters(schema: dict[str, Any]) -> tuple[Parameter, ...]:
             )
         )
     return tuple(params)
+
+
+""" session.list_tools()返回架构
+
+ListToolsResult(
+    tools=[
+        Tool(
+            name="get_weather",
+            title="Weather",
+            description="Get current weather for a city",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "City name"
+                    },
+                    "unit": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                        "default": "celsius"
+                    }
+                },
+                "required": ["city"]
+            },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "temperature": {"type": "number"},
+                    "condition": {"type": "string"}
+                },
+                "required": ["temperature", "condition"]
+            },
+            annotations=...,
+            icons=...,
+            _meta=...
+        ),
+
+        Tool(
+            name="search_web",
+            ...
+        )
+    ],
+    ...
+)
+"""
+
+"""
+
+
+"""
