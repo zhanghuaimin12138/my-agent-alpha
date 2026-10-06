@@ -160,7 +160,7 @@ def _parse_updates(tokens: list[str]) -> dict[str, str] | str:
 
 def _apply_update(rest: str) -> str:
     """修改某条待办的 state/text;rest 是 id 和 key=value 们。
-    
+
     1.update |<id> state=pending|in_progress|completed"
     2.update |<id> text=<新描述>
     """
@@ -191,7 +191,7 @@ def _apply_update(rest: str) -> str:
 
 def _apply_remove(rest: str) -> str:
     """删除某条待办。
-    
+
     remove <id>
     """
     tokens = rest.split()
