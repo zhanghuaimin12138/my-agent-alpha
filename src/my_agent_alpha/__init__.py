@@ -76,6 +76,11 @@ def main(argv: list[str] | None = None) -> None:
 
     session_name = args.name or generate_conversation_id()
     logdir = get_logs_dir() / session_name
+    if args.name:
+        # 用户起名的会话:直接把名字写成标题,/log list 统一显示
+        from my_agent_alpha.hooks.naming import write_session_title
+
+        write_session_title(logdir, args.name)
     non_interactive = args.non_interactive or bool(args.prompts)
 
     try:

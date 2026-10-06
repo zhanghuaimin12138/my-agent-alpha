@@ -48,8 +48,22 @@ def tools_cmd(ctx: CommandContext) -> None:
 
 @command("log")
 def log_cmd(ctx: CommandContext) -> None:
-    """/log:会话目录和消息条数。"""
+    """/log:当前会话信息;/log list 列出全部会话(目录名 + 标题)。"""
+    from my_agent_alpha.hooks.naming import read_session_title
+
+    if ctx.args and ctx.args[0] == "list":
+        logs_root = ctx.manager.logdir.parent
+        sessions = sorted(p for p in logs_root.iterdir() if p.is_dir())
+        if not sessions:
+            print("  (还没有任何会话)")
+            return
+        for d in sessions:
+            print(f"  {d.name:<22} {read_session_title(d) or '(未命名)'}")
+        return
+    title = read_session_title(ctx.manager.logdir)  # 可能还没命名(None)
     print(f"  会话目录:{ctx.manager.logdir}")
+    if title:
+        print(f"  会话标题:{title}")
     print(f"  消息条数:{len(ctx.manager)}")
 
 

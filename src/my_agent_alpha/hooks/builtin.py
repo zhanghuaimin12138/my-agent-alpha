@@ -44,5 +44,8 @@ def register_builtin_hooks() -> None:
 
     register_hook("builtin.usage", HookType.GENERATION_POST, usage_hook, priority=0)
     register_hook("builtin.session_info", HookType.SESSION_START, session_info_hook, priority=0)
-    # todo 工具的完成门控(loop.continue)与会话恢复重放(session.start)
+    # 会话自动命名(turn.post);todo 工具的门控与重放
+    from my_agent_alpha.hooks.naming import register_naming_hook
+
+    register_naming_hook()
     register_todo_hooks()

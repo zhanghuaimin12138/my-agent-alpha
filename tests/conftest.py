@@ -25,7 +25,9 @@ def workspace(tmp_path: Path) -> Iterator[Path]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_agent_state(workspace: Path, logdir: Path) -> Iterator[None]:
+def _reset_agent_state(
+    workspace: Path, logdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
     """每个测试前后清干净全局可变状态(mock 脚本、工具注册表、ContextVar)。
 
     仿 gptme conftest 的"teardown 卫生"哲学:agent 是有状态程序,
@@ -37,6 +39,10 @@ def _reset_agent_state(workspace: Path, logdir: Path) -> Iterator[None]:
     from my_agent_alpha.llm import mock as llm_mock
     from my_agent_alpha.tools import clear_tools
     from my_agent_alpha.tools import todo as todo_mod
+
+    # 默认关掉会话自动命名:命名钩子的额外模型调用会消耗 mock 脚本序列,
+    # 搅乱无关测试;需要测命名时在测试里设回 "1"(见 test_naming.py)
+    monkeypatch.setenv("ALPHA_AUTO_NAME", "0")
 
     llm_mock.clear_scripted()
     clear_tools()
