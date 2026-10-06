@@ -40,5 +40,9 @@ def session_info_hook(manager: LogManager, **_ctx: object) -> Iterator[Message]:
 
 def register_builtin_hooks() -> None:
     """注册全部内置钩子(幂等:同名重注册自动替换)。"""
+    from my_agent_alpha.tools.todo import register_todo_hooks
+
     register_hook("builtin.usage", HookType.GENERATION_POST, usage_hook, priority=0)
     register_hook("builtin.session_info", HookType.SESSION_START, session_info_hook, priority=0)
+    # todo 工具的完成门控(loop.continue)与会话恢复重放(session.start)
+    register_todo_hooks()

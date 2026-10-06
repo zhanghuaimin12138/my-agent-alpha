@@ -22,7 +22,9 @@
     turn.post       一个回合处理完毕
     step.pre        中层循环每次调用模型前
     generation.post 模型回复生成完毕(带 usage 用量)
-    loop.continue   外层循环每圈结束(可用来排"下一步该做什么"的接力消息)
+    loop.continue   外层循环每圈结束(可用来排"下一步该做什么"的接力消息:
+                    产出的 user 消息会被回灌成下一轮输入,system 消息只落日志;
+                    回灌的 user 消息不要以 / 开头,否则会被当成斜杠命令)
 """
 
 from __future__ import annotations

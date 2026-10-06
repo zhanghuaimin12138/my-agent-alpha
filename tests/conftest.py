@@ -36,11 +36,13 @@ def _reset_agent_state(workspace: Path, logdir: Path) -> Iterator[None]:
     from my_agent_alpha.hooks import clear_hooks
     from my_agent_alpha.llm import mock as llm_mock
     from my_agent_alpha.tools import clear_tools
+    from my_agent_alpha.tools import todo as todo_mod
 
     llm_mock.clear_scripted()
     clear_tools()
     clear_confirm_hooks()
     clear_hooks()
+    todo_mod._reset_todos()  # todo 的清单/门控计数是模块级状态,不随注册表清空
     with context.agent_context(workspace, logdir):
         yield
     llm_mock.clear_scripted()

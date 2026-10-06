@@ -16,6 +16,7 @@ from my_agent_alpha.tools import read as read_mod
 from my_agent_alpha.tools import save as save_mod
 from my_agent_alpha.tools import shell as shell_mod
 from my_agent_alpha.tools import subagent as subagent_mod
+from my_agent_alpha.tools import todo as todo_mod
 from my_agent_alpha.tools.base import ToolSpec, ToolUse
 
 # 已加载的工具列表存在 ContextVar 里(而不是全局变量):
@@ -23,7 +24,7 @@ from my_agent_alpha.tools.base import ToolSpec, ToolUse
 _tools_var: ContextVar[tuple[ToolSpec, ...] | None] = ContextVar("alpha_tools", default=None)
 
 # 内置工具模块(每个模块暴露模块级 tool / 多个 tool)
-_BUILTIN_MODULES = (shell_mod, read_mod, save_mod, memory_mod, subagent_mod, edit_mod)
+_BUILTIN_MODULES = (shell_mod, read_mod, save_mod, memory_mod, subagent_mod, edit_mod, todo_mod)
 
 
 def _collect_builtins() -> tuple[ToolSpec, ...]:

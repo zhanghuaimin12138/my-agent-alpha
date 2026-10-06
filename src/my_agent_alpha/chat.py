@@ -569,7 +569,15 @@ def _run_chat_loop(
             manager.append(Message("system", f"{LLM_REQUEST_FAILED_PREFIX} {e}"))
             print(f"\n{LLM_REQUEST_FAILED_PREFIX} {e}(回到提示符)")
         _dispatch_hooks(manager, HookType.TURN_POST)
-        _dispatch_hooks(manager, HookType.LOOP_CONTINUE)
+        # loop.continue:钩子产出的 user 接力输入回灌队列(由消费端统一落日志,
+        # 不在这里重复落盘);system 只落日志不回灌(如熔断报告)。
+        # 语义对齐 gptme 的 prompt_queue 接力(产出 → 队列 → 外层 continue 消费)
+        for msg in trigger_hook(HookType.LOOP_CONTINUE, manager=manager):
+            _print_message(msg)
+            if msg.role == "user":
+                prompt_queue.append(msg.content)
+            else:
+                manager.append(msg)
 
 
 def chat(
