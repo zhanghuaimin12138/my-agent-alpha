@@ -102,6 +102,22 @@ def test_reason_advice_or_demo_not_announcement() -> None:
     )
 
 
+def test_reason_conditional_offer_not_announcement() -> None:
+    """条件句里的"让我"不是宣告(真机 2026-1007-2da08f 完整回答被误提醒,
+    模型把整段回答原样重复了一遍)。"""
+    # 真机误报句式:"想让我"是假设,不是"我现在就去干"
+    assert (
+        missed_tooluse_reason(
+            [Message("assistant", "如果你想让我记住更多(比如称呼、技术栈偏好),告诉我即可。")]
+        )
+        is None
+    )
+    assert missed_tooluse_reason([Message("assistant", "需要的话可以让我更新这条记忆。")]) is None
+    # 句首式宣告仍然必须命中(回归保护)
+    assert missed_tooluse_reason([Message("assistant", "好的,我来处理这件事。")]) is not None
+    assert missed_tooluse_reason([Message("assistant", "让我先看看这个文件的内容。")]) is not None
+
+
 def test_reason_unparsed_native_call_line() -> None:
     """回复里有调用行、严格解析却失败(编号字符怪异):提醒而不是装没看见。
 

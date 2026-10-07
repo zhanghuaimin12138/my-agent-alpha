@@ -145,7 +145,12 @@ NUDGE_PREFIX = "[工具调用提醒]"
 # 只收"我 + 动作"的词;刻意不收"帮你/帮您/试试"这类太常见的词 ——
 # 真机复测里"我可以帮你做这些事:"(能力介绍)、"需要我帮你找找吗?"
 # (主动提议)都是正常最终回答,收了必误报(误报代价是多跑一轮生成)
-_ANNOUNCE_MARKERS = ("我来", "让我", "我去", "这就", "马上", "稍等", "let me", "i'll ")
+# 行动宣告词(分支 4 用)。"我来/让我/我去"要用带否定预查的正则:
+# 紧挨着 想/要/会/可/如/若/你/别 这些字时是条件句("如果你让我……"那类),
+# 不是宣告 —— 真机会话 2026-1007-2da08f 误报过一次,模型把完整回答
+# 原样重复了一遍。
+_ANNOUNCE_RE = re.compile(r"(?<![想要会可如若你别以能])(我来|让我|我去)")
+_ANNOUNCE_WORDS = ("这就", "马上", "稍等", "let me", "i'll ")
 
 # 宽松版"疑似原生调用行"探测器:@工具名(随便什么编号): { 开头。
 # 比严格解析的 _NATIVE_CALL_RE 宽(不限制编号字符集):严格解析失败、
@@ -185,7 +190,9 @@ def missed_tooluse_reason(messages: Sequence[Message]) -> str | None:
        典型的"要说接下来执行什么,结果代码块忘写了";
     4. 行动宣告(真机实录"我来帮你查一下上海今天的天气。"):说要干活
        但没带冒号、也没写代码块 —— 只要正文一个围栏都没有、又出现
-       "我来/帮你/稍待"这类词,就值得提醒一次;
+       句首式的"我来/让我/我去"或"这就/马上/稍等",就值得提醒一次;
+       条件句里的"让我"不算("如果你让我记住更多,告诉我即可"是收尾
+       提议,不是宣告,2026-1007-2da08f 真机误报过);
     5. 疑似原生调用行没被解析出来:回复里有 "@工具名(编号): {" 形态
        (宽松探测),严格解析却一个调用都没得到 —— 说明编号或参数写得
        不合规,该提醒而不是装没看见。
@@ -206,7 +213,9 @@ def missed_tooluse_reason(messages: Sequence[Message]) -> str | None:
     for cb in iter_from_markdown(body):
         if cb.lang and get_tool_for_langtag(cb.lang) is None and _resembles_known_tool(cb.lang):
             return f"代码块标记 ```{cb.lang} 不是任何已知工具的名字"
-    if not has_fence and any(m in body.lower() for m in _ANNOUNCE_MARKERS):
+    if not has_fence and (
+        _ANNOUNCE_RE.search(body) or any(m in body.lower() for m in _ANNOUNCE_WORDS)
+    ):
         return '回复在宣布要执行操作(如"我来……"),却没有工具调用代码块'
     # 围栏里的 @xxx 只是文档示例,探测前先把围栏区域盖掉
     if _LOOSE_NATIVE_CALL_RE.search(_blank_fences(body)):
