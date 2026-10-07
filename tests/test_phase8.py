@@ -217,6 +217,132 @@ def test_index_byte_cap(clean_dirs: Path) -> None:
     assert len(text.encode("utf-8")) < 20 * 1024
 
 
+# ============ M3:scope 推断、覆盖提示、删除 ============
+
+
+def test_scope_inference_by_type(clean_dirs: Path) -> None:
+    """层级推断:user/feedback → 用户层,project/reference → 项目层(方案 M3.1)。"""
+    from my_agent_alpha.dirs import get_data_dir
+
+    ws = clean_dirs / "ws"
+    ws.mkdir()
+    # 不传 project_level,全靠类型推断
+    save_memory("身份甲", "用户是运维", ws, mem_type="user")
+    save_memory("纠正甲", "回答要简短", ws, mem_type="feedback")
+    save_memory("事实甲", "项目用 uv", ws, mem_type="project")
+    save_memory("指针甲", "看板地址", ws, mem_type="reference")
+    user_dir = get_data_dir() / "memory"
+    assert (user_dir / "身份甲.md").exists() and (user_dir / "纠正甲.md").exists()
+    assert (ws / "memory" / "事实甲.md").exists()
+    assert (ws / "memory" / "指针甲.md").exists()
+    # 都不传:默认 project → 项目层
+    save_memory("默认甲", "裸保存", ws)
+    assert (ws / "memory" / "默认甲.md").exists()
+
+
+def test_scope_explicit_overrides(clean_dirs: Path) -> None:
+    """显式指定盖过推断:scope 参数 > 内容 frontmatter 的 scope > 类型推断。"""
+    from my_agent_alpha.dirs import get_data_dir
+
+    ws = clean_dirs / "ws"
+    ws.mkdir()
+    # 显式参数:user 类型硬写进项目层
+    save_memory("身份乙", "用户是运维", ws, project_level=True, mem_type="user")
+    assert (ws / "memory" / "身份乙.md").exists()
+    # 内容 frontmatter 的 scope:project 类型写进用户层
+    save_memory("事实乙", "---\nscope: user\n---\n项目事实", ws, mem_type="project")
+    assert (get_data_dir() / "memory" / "事实乙.md").exists()
+
+
+def test_tool_scope_param(clean_dirs: Path) -> None:
+    """工具通道:类型推断与显式 scope 都能落到对的层,非法 scope 报错不落盘。"""
+    from my_agent_alpha.context import get_workspace
+    from my_agent_alpha.dirs import get_data_dir
+
+    # conftest 的 autouse 夹具已把 workspace 指到 tmp 并进了 agent_context
+    execute_msg(
+        Message(
+            "assistant",
+            '@memory(c1): {"name": "偏好乙", "content": "喜欢简短", "type": "user"}',
+        )
+    )
+    assert (get_data_dir() / "memory" / "偏好乙.md").exists()  # user → 用户层
+    execute_msg(
+        Message(
+            "assistant",
+            '@memory(c2): {"name": "事实丙", "content": "项目事实", '
+            '"type": "project", "scope": "user"}',
+        )
+    )
+    assert (get_data_dir() / "memory" / "事实丙.md").exists()  # 显式盖过推断
+    results = execute_msg(
+        Message(
+            "assistant",
+            '@memory(c3): {"name": "坏scope", "content": "x", "scope": "team"}',
+        )
+    )
+    assert "错误" in results[0].content and "scope" in results[0].content
+    assert not (get_workspace() / "memory" / "坏scope.md").exists()
+
+
+def test_overwrite_notice(clean_dirs: Path) -> None:
+    """覆盖提示:同名重写要告诉模型旧内容被替换;跨层同名提示"被盖住"(方案 M3.2)。"""
+    execute_msg(Message("assistant", "```memory 部署甲\n旧标题\n旧正文\n```"))
+    results = execute_msg(Message("assistant", "```memory 部署甲\n新标题\n新正文\n```"))
+    assert "已记住" in results[0].content
+    assert "覆盖了旧记忆「旧标题」" in results[0].content
+    # 跨层同名:用户层已有,项目层再写 → 提示盖住而不是覆盖
+    execute_msg(
+        Message(
+            "assistant",
+            '@memory(c1): {"name": "偏好丙", "content": "用户层版本", "type": "user"}',
+        )
+    )
+    results2 = execute_msg(
+        Message(
+            "assistant",
+            '@memory(c2): {"name": "偏好丙", "content": "项目层版本", "scope": "project"}',
+        )
+    )
+    assert "盖住" in results2[0].content
+
+
+def test_delete_last_memory_removes_index_stub(clean_dirs: Path) -> None:
+    """删光一层后不留只剩标题的空壳索引(真机 2026-1007 反馈)。"""
+    from my_agent_alpha.context import get_workspace
+
+    execute_msg(Message("assistant", "```memory 独苗\n标题\n正文\n```"))
+    assert (get_workspace() / "memory" / "MEMORY.md").exists()
+    execute_msg(Message("assistant", "```memory delete 独苗\n```"))
+    assert not (get_workspace() / "memory" / "MEMORY.md").exists()
+    assert render_memory_index(get_workspace()) == ""
+
+
+def test_delete_memory(clean_dirs: Path) -> None:
+    """删除:原生 action=delete 与围栏 delete 都能删;删完索引同步;没有的报不误删。"""
+    from my_agent_alpha.context import get_workspace
+
+    execute_msg(Message("assistant", "```memory 待删甲\n标题甲\n正文\n```"))
+    execute_msg(Message("assistant", "```memory 待删乙\n标题乙\n正文\n```"))
+    # 原生通道删除
+    results = execute_msg(
+        Message("assistant", '@memory(c1): {"action": "delete", "name": "待删甲"}')
+    )
+    assert "已删除" in results[0].content
+    assert not (get_workspace() / "memory" / "待删甲.md").exists()
+    # 围栏通道删除
+    results2 = execute_msg(Message("assistant", "```memory delete 待删乙\n```"))
+    assert "已删除" in results2[0].content
+    # 索引同步:两条都没了;层删空 → 索引文件整个移除(空壳清理)
+    assert not (get_workspace() / "memory" / "MEMORY.md").exists()
+    assert render_memory_index(get_workspace()) == ""  # 全删光 → 不再注入
+    # 删不存在的:明确报告,不炸
+    results3 = execute_msg(
+        Message("assistant", '@memory(c2): {"action": "delete", "name": "不存在"}')
+    )
+    assert "没有叫" in results3[0].content
+
+
 def test_e2e_memory_injected_into_session(
     clean_dirs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

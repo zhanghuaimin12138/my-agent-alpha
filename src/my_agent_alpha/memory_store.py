@@ -12,6 +12,10 @@
 - 两层目录(近的盖住远的,仿 gptme 的"nearest-first"):
     工作区/memory/   ← 当前项目的记忆(优先)
     数据目录/memory/ ← 用户级记忆(~/.local/share/my_agent_alpha/memory)
+    哪层由类型推断(user/feedback → 用户层,project/reference → 项目层),
+    可用 scope 显式指定(方案 M3.1);
+- 更新与删除:同名保存 = 覆盖更新(find_memory 供工具层做覆盖提示);
+    delete_memory 按名删(删近层),发现记忆被证伪就该删(方案 M3.2);
 - MEMORY.md:自动生成的指针索引(一行一条:链接 + 描述 + 类型),给人看;
   会话开始时另渲染一份带新鲜度标注的版本注入模型(有行数/字节双上限,
   CC 报告 §2.6 的教训:单上限挡不住另一种超限);
@@ -75,6 +79,8 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
 
     没有合法 frontmatter(不是 --- 开头、或找不到闭合 ---)就返回
     ({}, 原文)—— 旧格式文件因此天然兼容,这就是"读时兼容"。
+    认五个键:name/description/type/created 是记忆自身的属性,
+    scope 只在保存输入里出现(决定写进哪层目录,不落盘)。
 
     示例:输入 "---\\ntype: user\\n---\\n# 标题\\n正文"
     → ({"type": "user"}, "# 标题\\n正文")
@@ -87,7 +93,7 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
             fields: dict[str, str] = {}
             for ln in lines[1:i]:
                 key, sep, value = ln.partition(":")
-                if sep and key.strip() in ("name", "description", "type", "created"):
+                if sep and key.strip() in ("name", "description", "type", "created", "scope"):
                     fields[key.strip()] = value.strip()
             return fields, "\n".join(lines[i + 1 :])
     return {}, text  # 没有闭合 ---:当普通正文,不当作 frontmatter
@@ -140,15 +146,19 @@ def save_memory(
     name: str,
     content: str,
     workspace: Path,
-    project_level: bool = False,
+    project_level: bool | None = None,
     mem_type: str | None = None,
     description: str | None = None,
 ) -> Path:
     """写一条记忆并重建索引,返回文件路径。
 
-    project_level=True 写进工作区层(项目记忆),否则用户层。
+    层级(哪层目录)的判定优先级(方案 M3.1):
+    显式 project_level(True/False)> 内容 frontmatter 的 scope >
+    按类型推断(user/feedback → 用户层,project/reference → 项目层)。
+    —— 用户身份类记忆换项目也该看得见,项目事实类记忆跟着项目走。
+
     content 首行做标题;content 开头可以自带一段 frontmatter
-    (description/type),显式参数优先于它、它优先于默认值 ——
+    (description/type/scope),显式参数优先于它、它优先于默认值 ——
     markdown 通道的模型把描述写进内容开头即可享受同等待遇。
     落盘统一是新格式(frontmatter + # 标题 + 正文)。
     """
@@ -156,6 +166,14 @@ def save_memory(
     final_type = mem_type or fields.get("type") or "project"
     if final_type not in MEMORY_TYPES:
         final_type = "project"
+    if project_level is None:
+        scope = fields.get("scope")
+        if scope == "user":
+            project_level = False
+        elif scope == "project":
+            project_level = True
+        else:
+            project_level = final_type not in ("user", "feedback")
     lines = body.strip().split("\n")
     title = lines[0].lstrip("# ").strip() if lines else ""
     final_desc = description or fields.get("description") or title
@@ -175,6 +193,33 @@ def save_memory(
     return path
 
 
+def find_memory(name: str, workspace: Path) -> MemoryEntry | None:
+    """按名字找一条已有记忆(同名近层优先),找不到返回 None。
+
+    给"覆盖更新提示"和"删除"用:名字先过 _slug 再比对文件名,
+    和 save_memory 的落盘路径用同一套规则,不会找错。
+    """
+    slug = _slug(name)
+    for e in list_memories(workspace):
+        if e.path.stem == slug:
+            return e
+    return None
+
+
+def delete_memory(name: str, workspace: Path) -> Path | None:
+    """按名删一条记忆并重建索引,返回被删的路径;没找到返回 None。
+
+    同名两层都在时删近层(近层盖远层,看得见的就是被删的那个);
+    删除由工具层走确认链把关,这里只管机械执行。
+    """
+    entry = find_memory(name, workspace)
+    if entry is None:
+        return None
+    entry.path.unlink()  # 删除路径指向的文件
+    rebuild_index(workspace)
+    return entry.path
+
+
 def rebuild_index(workspace: Path) -> None:
     """重建每层的 MEMORY.md 索引(一行一条:链接 + 描述 + 类型)。
 
@@ -185,13 +230,18 @@ def rebuild_index(workspace: Path) -> None:
         if not d.exists():
             continue
         entries = sorted(p for p in d.glob("*.md") if p.name != "MEMORY.md")
+        index = d / "MEMORY.md"
+        if not entries:
+            # 这层删空了:索引不留只剩标题的空壳(真机 2026-1007 反馈)
+            index.unlink(missing_ok=True)
+            continue
         lines = ["# 记忆索引(自动生成,勿手改)", ""]
         for p in entries:
             title, description, mem_type = _parse_memory_text(p.read_text(encoding="utf-8"))
             desc = (description or title or p.stem)[:_DESC_MAX_CHARS]
             # 链接文本用名字(不用标题):模型"同名覆盖更新"要拿名字当钥匙
             lines.append(f"- [{p.stem}]({p.name}) — {desc}({mem_type})")
-        (d / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        index.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _age_label(mtime: float, *, now: float | None = None) -> str:
