@@ -77,6 +77,146 @@ def test_memory_tool_writes_project_layer(clean_dirs: Path) -> None:
     assert (get_workspace() / "memory" / "测试记忆.md").exists()
 
 
+# ============ M1/M2:frontmatter、类型、新鲜度、双上限 ============
+
+
+def test_frontmatter_roundtrip(clean_dirs: Path) -> None:
+    """新格式:保存带 type/description,文件头有 frontmatter,索引行带描述和类型。"""
+    ws = clean_dirs / "ws"
+    ws.mkdir()
+    path = save_memory(
+        "部署流程",
+        "服务器发布步骤\n1. ssh",
+        ws,
+        project_level=True,
+        mem_type="project",
+        description="登录与发布步骤,含 systemctl",
+    )
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---")  # frontmatter 打头
+    assert "type: project" in text and "created:" in text
+    entries = list_memories(ws)
+    assert entries[0].description == "登录与发布步骤,含 systemctl"
+    assert entries[0].mem_type == "project"
+    index = (ws / "memory" / "MEMORY.md").read_text(encoding="utf-8")
+    assert "登录与发布步骤" in index and "(project)" in index
+    rendered = render_memory_index(ws)
+    assert "引用前先验证" in rendered  # M1.4:头部行为协议
+    assert "(project·" in rendered  # 类型 + 新鲜度进了注入行
+
+
+def test_old_format_compat(clean_dirs: Path) -> None:
+    """旧格式(无 frontmatter)读时兼容:回填默认值,文件本身一个字都不动。"""
+    ws = clean_dirs / "ws"
+    ws.mkdir()
+    d = ws / "memory"
+    d.mkdir(parents=True)
+    (d / "旧记忆.md").write_text("# 旧标题\n\n旧正文\n\n*记录于 2026-09-01*\n", encoding="utf-8")
+    entries = list_memories(ws)
+    assert entries[0].title == "旧标题"
+    assert entries[0].mem_type == "project"  # 无 frontmatter → 默认 project
+    assert entries[0].description == "旧标题"  # 描述回填标题
+    text = render_memory_index(ws)
+    assert "旧标题" in text and "project" in text
+    # "读时兼容":旧文件不被重写,只有再次保存才升级格式
+    assert "*记录于 2026-09-01*" in (d / "旧记忆.md").read_text(encoding="utf-8")
+
+
+def test_content_frontmatter(clean_dirs: Path) -> None:
+    """content 开头自带 frontmatter:字段被提取;显式参数优先于它。"""
+    ws = clean_dirs / "ws"
+    ws.mkdir()
+    save_memory(
+        "记忆甲",
+        "---\ndescription: 描述甲\ntype: feedback\n---\n标题甲\n正文甲",
+        ws,
+        project_level=True,
+    )
+    e = list_memories(ws)[0]
+    assert e.description == "描述甲"
+    assert e.mem_type == "feedback"
+    text = e.path.read_text(encoding="utf-8")
+    assert "# 标题甲" in text and "描述甲" in text  # 落盘是新格式:头部重写 frontmatter
+    # 显式参数 > 内容 frontmatter
+    save_memory(
+        "记忆乙", "---\ntype: feedback\n---\n标题乙", ws, project_level=True, mem_type="user"
+    )
+    e2 = next(m for m in list_memories(ws) if m.name == "记忆乙")
+    assert e2.mem_type == "user"
+
+
+def test_memory_tool_type_and_validation(clean_dirs: Path) -> None:
+    """工具通道:type/description 参数与围栏头类型都能用;非法 type 报错不落盘。"""
+    from my_agent_alpha.context import get_workspace
+
+    msg = Message(
+        "assistant",
+        '@memory(c1): {"name": "偏好甲", "content": "喜欢简短\\n正文", '
+        '"type": "user", "description": "回答要简短"}',
+    )
+    results = execute_msg(msg)
+    assert "已记住" in results[0].content
+    e = list_memories(get_workspace())[0]
+    assert e.mem_type == "user" and e.description == "回答要简短"
+    # 围栏头第二个词当类型("```memory 围栏偏好 user")
+    execute_msg(Message("assistant", "```memory 围栏偏好 user\n围栏标题\n```"))
+    e2 = next(m for m in list_memories(get_workspace()) if m.name == "围栏偏好")
+    assert e2.mem_type == "user"
+    # 非法类型:报错且不写文件
+    before = set((get_workspace() / "memory").glob("*.md"))
+    results2 = execute_msg(
+        Message("assistant", '@memory(c2): {"name": "坏记忆", "content": "x", "type": "diary"}')
+    )
+    assert "错误" in results2[0].content and "diary" in results2[0].content
+    assert set((get_workspace() / "memory").glob("*.md")) == before
+
+
+def test_freshness_labels(clean_dirs: Path) -> None:
+    """注入行按 mtime 标年龄:今天 / N 天前 / 超龄加 ⚠旧(方案 M2.2)。"""
+    import os
+    import time
+
+    ws = clean_dirs / "ws"
+    ws.mkdir()
+    fresh = save_memory("新记忆", "新标题", ws, project_level=True)
+    days3 = save_memory("三天记忆", "三天标题", ws, project_level=True)
+    stale = save_memory("旧记忆", "旧标题", ws, project_level=True)
+    os.utime(days3, (time.time() - 3 * 86400,) * 2)
+    os.utime(stale, (time.time() - 40 * 86400,) * 2)
+    assert fresh  # 只是让 ruff 不报未使用变量
+    text = render_memory_index(ws)
+    assert "·今天)" in text
+    assert "3 天前)" in text
+    assert "40 天前⚠旧)" in text
+
+
+def test_index_line_cap(clean_dirs: Path) -> None:
+    """行数上限:105 条 → 注入只保留 100 行,并注明触发了行数上限(方案 M2.1)。"""
+    ws = clean_dirs / "ws"
+    ws.mkdir()
+    for i in range(105):
+        save_memory(f"m{i:03d}", f"标题{i}", ws, project_level=True)
+    text = render_memory_index(ws)
+    assert "行数上限已截断" in text
+    rows = [ln for ln in text.split("\n") if ln.startswith("- [")]
+    assert len(rows) == 100
+
+
+def test_index_byte_cap(clean_dirs: Path) -> None:
+    """字节上限:行数没超但每行很长(汉字描述)→ 字节上限兜底(方案 M2.1)。"""
+    ws = clean_dirs / "ws"
+    ws.mkdir()
+    d = ws / "memory"
+    d.mkdir(parents=True)
+    # 60 行 × 每行约 400B(120 个汉字的描述)≈ 24KB > 16KB,而 60 < 100 行
+    for i in range(60):
+        (d / f"b{i:02d}.md").write_text(f"# {'长' * 130}\n\n正文\n", encoding="utf-8")
+    text = render_memory_index(ws)
+    assert "字节上限已截断" in text
+    # 注入文本确实被压在双上限附近(允许头部说明的少量超出)
+    assert len(text.encode("utf-8")) < 20 * 1024
+
+
 def test_e2e_memory_injected_into_session(
     clean_dirs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
