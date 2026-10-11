@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import replace
 
@@ -23,6 +24,15 @@ from my_agent_alpha.tools.base import ToolSpec, ToolUse
 # 已加载的工具列表存在 ContextVar 里(而不是全局变量):
 # 将来多线程跑多个会话时,每个线程可以有自己的工具列表,互不干扰
 _tools_var: ContextVar[tuple[ToolSpec, ...] | None] = ContextVar("alpha_tools", default=None)
+
+# 生效中的工具白名单(None = 没有限制)。restrict_tools 设置;
+# 当前进程使用的工具就是_tools_var
+# _allowed_var!=none: _tools_var = _allowed_var ∩ 实际装进注册表的工具(来自mcp,等等)
+# _allowed_var==none: _tools_var = 实际装进注册表的工具
+
+# add_tools 追加(MCP 连上后)时也要过这道闸 —— 否则"晚到的"工具
+# 会绕过白名单混进受限子代理(--tools 在 chat 连 MCP 之前就生效了)
+_allowed_var: ContextVar[frozenset[str] | None] = ContextVar("alpha_tools_allowed", default=None)
 
 # 内置工具模块(每个模块暴露模块级 tool / 多个 tool)
 _BUILTIN_MODULES = (
@@ -54,21 +64,26 @@ def init_tools() -> None:
 
 
 def clear_tools() -> None:
-    """清空注册表(测试之间重置状态用)。"""
+    """清空注册表和白名单(测试之间重置状态用)。"""
     _tools_var.set(None)
+    _allowed_var.set(None)
 
 
 def add_tools(specs: tuple[ToolSpec, ...]) -> None:
-    """往注册表追加工具(按名字去重)。
+    """往注册表追加工具(按名字去重;白名单生效时只收白名单内的)。
 
     用途:阶段 8 的 MCP —— 连上外部服务器后,把远端工具包成本地
     ToolSpec 追加进来(先 init_tools 保证内置表就位)。
     """
     init_tools()
+    allowed = _allowed_var.get()
+    if allowed is not None:
+        specs = tuple(t for t in specs if t.name in allowed)  # 晚到的也过闸
     current = _tools_var.get() or ()
     existing = {t.name for t in current}
     merged = current + tuple(t for t in specs if t.name not in existing)
     _tools_var.set(merged)
+
 
 
 def get_tools() -> tuple[ToolSpec, ...]:
@@ -82,6 +97,26 @@ def get_tools() -> tuple[ToolSpec, ...]:
 def get_tool(name: str) -> ToolSpec | None:
     """按工具名查找,找不到返回 None。"""
     return next((t for t in get_tools() if t.name == name), None)
+
+
+def restrict_tools(allowed: Sequence[str]) -> tuple[str, ...]:
+    """根据传入参数allowed裁剪当前的_tools_var和_allowed_var,并且返回allowed有但是tools_var没有的工具名称。
+
+    给"派受限子代理"用:如记忆整理代理只给 read/grep/edit/memory,
+    不给 shell —— 危险面收窄到白名单内(Claude Code 的 dream 代理同款
+    约束:写只走 Edit/Write,Bash 只读)。
+
+    示例:restrict_tools(["read", "grep", "memory"]) 之后,
+    get_tool("shell") 返回 None,markdown 围栏 ```shell 也不再被识别。
+    """
+    init_tools()
+    current = _tools_var.get() or ()
+    names = {t.name for t in current}
+    # 根据allowed裁剪当前的tools_var
+    _tools_var.set(tuple(t for t in current if t.name in set(allowed)))
+    # 设置_allowed_var
+    _allowed_var.set(frozenset(allowed))  # 之后 add_tools(MCP)也要过这道闸
+    return tuple(a for a in allowed if a not in names)  # 想留但注册表里没有的
 
 
 def get_tool_for_langtag(lang: str) -> ToolSpec | None:

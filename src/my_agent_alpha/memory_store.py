@@ -220,6 +220,43 @@ def delete_memory(name: str, workspace: Path) -> Path | None:
     return entry.path
 
 
+def build_consolidate_prompt(workspace: Path) -> str:
+    """构造记忆整理代理的提示词(方案 M4,仿 CC auto-dream §3.2 四阶段)。
+
+    提示词里直接附上现有记忆清单(manifest:路径 + 描述 + 类型)——
+    CC extract 代理的做法:省掉子代理 ls 的一轮,也让它"先知道有什么
+    再动手"(内容级去重只能靠这个,没有程序化方案)。
+    执行它的子代理应由调用方收窄成 read/grep/edit/memory 白名单,不给 shell。
+    """
+    entries = list_memories(workspace)
+    project_dir, user_dir = memory_dirs(workspace)
+    manifest = "\n".join(f"- {e.path}: {e.description}({e.mem_type})" for e in entries) or (
+        "(现在一条记忆都没有,没什么可整理,直接报告即可)"
+    )
+    return f"""你是记忆整理代理,任务是整理下面的长期记忆:合并重复、修正矛盾、删除过时。
+
+两个记忆目录:
+- 项目层:{project_dir}
+- 用户层:{user_dir}
+
+现有记忆清单(先看清单再动手;描述就是每条记忆的摘要):
+{manifest}
+
+四步走:
+1. 定向:通读上面清单,对拿不准的条目用 read 看原文,搞清楚每条讲什么;
+2. 收集:标记三类问题 —— 近似重复(说的差不多,该合并)、相互矛盾(该修正)、
+   内容已经过时或被证伪(该删除);
+3. 固化:重复的合并进既有条目(用 memory 工具同名覆盖,把两条的内容合成一份,
+   别新建文件名);相对日期改成绝对日期;被证伪的用 "```memory delete 名字```" 删掉;
+4. 剪枝:确认最终每条记忆的 description 仍然具体准确(覆盖时可以顺手改)。
+
+约束:只能在两个记忆目录里增删改;不要新建记忆文件名,除非确无任何近似条目;
+改完的每一步都有工具结果反馈,确认成功再进行下一步。
+
+最后用中文输出整理报告:合并了什么(哪两条并成哪一条)、修正了什么、
+删除了什么、各自的理由;没动的也要说明。"""
+
+
 def rebuild_index(workspace: Path) -> None:
     """重建每层的 MEMORY.md 索引(一行一条:链接 + 描述 + 类型)。
 

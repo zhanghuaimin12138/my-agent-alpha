@@ -9,7 +9,10 @@
   不该中途等人;父代理这边照样过确认链(用户决定"要不要派它");
 - 通信:提示词从 stdin 传给子代理(防超长命令行),结果从子代理的
   日志文件里取"最后一条模型回复"(这就是把日志当唯一事实来源的红利);
-- 模型:默认继承父会话的模型(可用 model 参数覆盖)。
+- 模型:默认继承父会话的模型(可用 model 参数覆盖);
+- 白名单:tools 参数限定子代理只能用哪些工具(逗号分隔)——
+  整理记忆这类"能删文件的代理"就该收窄到 read/grep/edit/memory,
+  不给 shell(Claude Code 的 dream 代理同款约束)。
 
 和 gptme 的差异(记录在案):gptme 是 fire-and-forget + 钩子通知,
 支持并行派多个;我们是同步等待(一次派一个,等结果)—— 简单正确,
@@ -22,7 +25,7 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 
 from my_agent_alpha.context import get_current_model, get_workspace
 from my_agent_alpha.dirs import get_logs_dir
@@ -33,16 +36,22 @@ from my_agent_alpha.tools.base import Parameter, ToolSpec
 _TIMEOUT = int(os.environ.get("ALPHA_SUBAGENT_TIMEOUT", "300"))
 
 
-def execute_subagent(
-    code: str | None, args: list[str] | None, kwargs: dict[str, str] | None
+def run_subagent(
+    prompt: str,
+    *,
+    model: str | None = None,
+    allowed_tools: Sequence[str] | None = None,
 ) -> Iterator[Message]:
-    """派一个子代理执行任务,等它跑完,取最后一条模型回复作为结果。"""
-    prompt = (kwargs.get("prompt") if kwargs else None) or code or ""
-    model = (kwargs.get("model") if kwargs else None) or get_current_model() or "mock/echo"
+    """派一个子代理执行任务并等它跑完,逐条产出进度/结果消息。
+
+    这是"派子代理"的公共入口:subagent 工具转发它,slash 命令
+    (/memory consolidate)也直接用它 —— 两边共享同一套子进程编排。
+    allowed_tools 非空时,子代理的工具注册表会被裁剪成这个白名单。
+    """
     if not prompt.strip():
         yield Message("system", "错误: subagent 需要 prompt(任务描述)")
         return
-
+    chosen_model = model or get_current_model() or "mock/echo"
     name = f"subagent-{generate_conversation_id()}"
     workspace = get_workspace()
     cmd = [
@@ -56,10 +65,12 @@ def execute_subagent(
         "--workspace",
         str(workspace),
         "-m",
-        model,
+        chosen_model,
         "-",  # 提示词从 stdin 读
     ]
-    yield Message("system", f"▶ 已派出子代理 {name}(模型 {model}),等待完成…")
+    if allowed_tools:
+        cmd += ["--tools", ",".join(allowed_tools)]
+    yield Message("system", f"▶ 已派出子代理 {name}(模型 {chosen_model}),等待完成…")
 
     try:
         proc = subprocess.run(
@@ -86,6 +97,17 @@ def execute_subagent(
         yield Message("system", f"✗ 子代理 {name} 完成,但日志里没有回复")
         return
     yield Message("system", f"✅ 子代理 {name} 的结论:\n\n{result}")
+
+
+def execute_subagent(
+    code: str | None, args: list[str] | None, kwargs: dict[str, str] | None
+) -> Iterator[Message]:
+    """工具通道的薄封装:解析参数后直接转发给 run_subagent。"""
+    prompt = (kwargs.get("prompt") if kwargs else None) or code or ""
+    model = kwargs.get("model") if kwargs else None
+    tools_raw = kwargs.get("tools") if kwargs else None
+    allowed = [t.strip() for t in tools_raw.split(",") if t.strip()] if tools_raw else None
+    yield from run_subagent(prompt, model=model, allowed_tools=allowed)
 
 
 def _pythonpath() -> str:
@@ -122,12 +144,21 @@ tool = ToolSpec(
         "派一个子代理独立完成一项任务并返回它的结论。"
         "适合可并行的独立调查/信息收集;子代理有自己的会话,看不到当前对话。"
     ),
-    instructions=("任务描述要自包含(子代理不知道我们聊过什么),并写清期望它返回什么。"),
+    instructions=(
+        "任务描述要自包含(子代理不知道我们聊过什么),并写清期望它返回什么。"
+        "要限制它的能力(如只许读和改记忆),传 tools 白名单。"
+    ),
     examples="```subagent\n调查 /tmp 目录下最大的三个文件,返回名字和大小\n```",
     block_types=("subagent",),
     parameters=(
         Parameter("prompt", "string", "给子代理的完整任务描述(自包含)"),
         Parameter("model", "string", "覆盖子代理用的模型(默认继承当前会话)", required=False),
+        Parameter(
+            "tools",
+            "string",
+            "工具白名单,逗号分隔(如 read,grep,edit,memory);不传 = 全部工具",
+            required=False,
+        ),
     ),
     execute=execute_subagent,
 )

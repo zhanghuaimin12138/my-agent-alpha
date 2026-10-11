@@ -5,13 +5,46 @@ from __future__ import annotations
 from pathlib import Path
 
 from my_agent_alpha import Message
-from my_agent_alpha.tools import execute_msg, get_tool, get_tool_for_langtag, get_tools
+from my_agent_alpha.tools import (
+    execute_msg,
+    get_tool,
+    get_tool_for_langtag,
+    get_tools,
+    restrict_tools,
+)
 from my_agent_alpha.tools.base import ToolSpec, ToolUse
 
 
 def test_registry_has_builtin_tools() -> None:
     names = {t.name for t in get_tools()}
     assert {"shell", "read", "save", "append"} <= names
+
+
+def test_restrict_tools_whitelist() -> None:
+    """白名单裁剪(受限子代理的地基):只留指定工具,没找到的名字如实报告。
+
+    注册表是 markdown 围栏和原生通道共用的查找入口,裁剪后
+    ```shell 围栏和 @shell 调用一起失效 —— 不存在"白名单漏了一条通道"。
+    """
+    missing = restrict_tools(["read", "grep", "memory", "不存在的工具"])
+    assert missing == ("不存在的工具",)  # 想留但注册表里没有的,返回给调用方告警
+    assert get_tool("shell") is None  # shell 被裁掉
+    assert get_tool_for_langtag("shell") is None  # 围栏 ```shell 不再被识别
+    assert get_tool("memory") is not None  # 白名单内的还在
+
+
+def test_whitelist_gates_late_added_tools() -> None:
+    """白名单要管住"晚到的"工具:MCP 在 chat() 里才连上、才 add_tools,
+    而 --tools 在那之前就生效了 —— 不设闸的话受限子代理会把远端工具漏进来。
+    """
+    from my_agent_alpha.tools import add_tools
+
+    restrict_tools(["read", "memory"])
+    outsider = ToolSpec(name="mcp.evil", desc="远端工具", execute=None)
+    insider = ToolSpec(name="memory", desc="同名占位", execute=None)
+    add_tools((outsider, insider))
+    assert get_tool("mcp.evil") is None  # 白名单外的进不来
+    assert get_tool("memory") is not None  # 白名单内的照常追加
 
 
 def test_langtag_lookup() -> None:

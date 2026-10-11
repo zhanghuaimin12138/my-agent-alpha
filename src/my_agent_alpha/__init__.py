@@ -52,6 +52,11 @@ def main(argv: list[str] | None = None) -> None:
         help="工具调用通道:markdown(围栏代码块)或 tool(原生 function calling)",
     )
     parser.add_argument("-y", "--yes", action="store_true", help="全部自动确认(安全护栏仍然生效)")
+    parser.add_argument(
+        "--tools",
+        default=None,
+        help="工具白名单(逗号分隔,如 read,grep,memory);缺省 = 全部内置工具",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = parser.parse_args(argv)
 
@@ -64,10 +69,18 @@ def main(argv: list[str] | None = None) -> None:
         effective_tool_format,
     )
     from my_agent_alpha.dirs import get_logs_dir
+    from my_agent_alpha.tools import restrict_tools
 
     prompts = list(args.prompts)
     if prompts == ["-"]:  # "-" = 从标准输入读提示词(给 subagent 用,防超长参数)
         prompts = [sys.stdin.read()]
+
+    if args.tools:
+        # 白名单要先于一切工具使用生效;没匹配上的名字如实告警
+        # (多半是拼写错,或该工具来自未连接的 MCP 服务器)
+        missing = restrict_tools([t.strip() for t in args.tools.split(",") if t.strip()])
+        if missing:
+            print(f"(警告: 白名单里的这些工具不存在,已忽略: {', '.join(missing)})")
 
     config = Config.load(args.workspace)
     model = effective_model(args.model, config)

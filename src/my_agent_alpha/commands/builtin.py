@@ -89,7 +89,10 @@ def hooks_cmd(ctx: CommandContext) -> None:
 
 @command("memory", "mem")
 def memory_cmd(ctx: CommandContext) -> None:
-    """/memory(别名 /mem):查看长期记忆;/memory show <名> 看某条全文。"""
+    """/memory(别名 /mem):查看记忆;/memory show <名> 看全文;/memory consolidate 整理。"""
+    if ctx.args and ctx.args[0] == "consolidate":
+        _consolidate_memories()
+        return
     if ctx.args and ctx.args[0] == "show" and len(ctx.args) > 1:
         name = ctx.args[1]
         for entry in list_memories(get_workspace() or Path.cwd()):
@@ -104,6 +107,21 @@ def memory_cmd(ctx: CommandContext) -> None:
         return
     for entry in entries:
         print(f"  {entry.name:<20} {entry.title}  [{entry.path.parent}]")
+
+
+def _consolidate_memories() -> None:
+    """派一个受限子代理整理长期记忆(方案 M4,"做梦"的手动版)。
+
+    白名单只给 read/grep/edit/memory —— 整理代理能改能删记忆文件,
+    但不能开 shell(Claude Code 的 dream 代理同款约束);
+    子代理带 -y 自动执行,派发这个动作本身就是用户审批。
+    """
+    from my_agent_alpha.memory_store import build_consolidate_prompt
+    from my_agent_alpha.tools.subagent import run_subagent
+
+    prompt = build_consolidate_prompt(get_workspace() or Path.cwd())
+    for msg in run_subagent(prompt, allowed_tools=("read", "grep", "edit", "memory")):
+        print(msg.content)
 
 
 def register_builtin_commands() -> None:
