@@ -60,9 +60,10 @@ def execute_shell(
         yield Message("system", "错误: shell 没有收到要执行的命令")
         return
     try:
+        # 显式点名 bash,而不是 shell=True:后者会走 /bin/sh,
+        # 而 Ubuntu 上 /bin/sh 其实是 dash,不认 [[ ]]、数组这些 bash 语法
         proc = subprocess.run(
-            command,
-            shell=True,
+            ["bash", "-c", command],
             cwd=get_workspace(),
             capture_output=True,
             text=True,
