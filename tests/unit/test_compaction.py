@@ -1,14 +1,14 @@
-"""阶段 6 上下文压缩测试:估算、预算、三阶段、兜底、溢出自愈。"""
+"""阶段 6 上下文压缩测试:估算、预算、三阶段、兜底。
+
+压缩接进 chat 的视图入口(prepare_messages)和溢出自愈(step 重试)
+在 tests/unit/test_chat.py;这里只测 compaction.py 自己的函数。
+"""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
 
-import pytest
-
 from my_agent_alpha import Message
-from my_agent_alpha.chat import prepare_messages, step
 from my_agent_alpha.compaction import (
     compact_messages,
     compress_long_replies,
@@ -20,7 +20,6 @@ from my_agent_alpha.compaction import (
     strip_old_thinking,
     truncate_tool_results,
 )
-from my_agent_alpha.llm import ContextLengthError
 
 # ---- token 估算与预算 ----
 
@@ -169,54 +168,3 @@ def test_compact_over_budget_fits(workspace: Path, logdir: Path) -> None:
     out = compact_messages(msgs, budget=3000, logdir=logdir)
     assert messages_tokens(out) <= 3000 + 1500  # 收敛到预算量级
     assert out[0].pinned  # 提示词没丢
-
-
-def test_prepare_messages_integration() -> None:
-    msgs = [Message("system", "提示词", pinned=True, hide=True)]
-    msgs += [Message("user", f"问{i}") for i in range(30)]
-    view = prepare_messages(msgs, "mock/echo", budget=80)
-    assert messages_tokens(view) <= 80 + 30  # 视图被压到预算量级
-    # 再次确认:原列表没被动
-    assert len(msgs) == 31
-
-
-# ---- 溢出自愈 ----
-
-
-def test_step_overflow_retry_with_smaller_context(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """第一次 reply 抛上下文超长 → step 以更小预算重压并重试一次。"""
-    from my_agent_alpha import chat as chat_mod
-
-    calls: list[Sequence[Message]] = []
-    state = {"failed": False}
-    real_reply = chat_mod.reply
-
-    def flaky_reply(messages, model, **kwargs):  # type: ignore[no-untyped-def]
-        calls.append(list(messages))
-        if not state["failed"]:
-            state["failed"] = True
-            raise ContextLengthError("This model's maximum context length is 4096 tokens")
-        return real_reply(messages, model, **kwargs)
-
-    monkeypatch.setattr(chat_mod, "reply", flaky_reply)
-    log = [Message("system", "提示词", pinned=True, hide=True)] + [
-        Message("user", f"消息{i}" + "内容" * 50) for i in range(20)
-    ]
-    out = list(step(log, "mock/echo", budget=2000))
-    assert len(calls) == 2  # 失败一次、重试一次
-    assert messages_tokens(list(calls[1])) <= messages_tokens(list(calls[0]))  # 重试的更小
-    assert out[0].role == "assistant"
-
-
-def test_step_overflow_second_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """重试仍超长 → 不再无限循环,异常抛出。"""
-    from my_agent_alpha import chat as chat_mod
-
-    def always_overflow(messages, model, **kwargs):  # type: ignore[no-untyped-def]
-        raise ContextLengthError("context length exceeded")
-
-    monkeypatch.setattr(chat_mod, "reply", always_overflow)
-    with pytest.raises(ContextLengthError):
-        list(step([Message("user", "hi")], "mock/echo"))

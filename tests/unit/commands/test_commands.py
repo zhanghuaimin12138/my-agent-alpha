@@ -1,4 +1,8 @@
-"""阶段 5 命令框架测试:注册/别名/执行/未知命令回退 + 内置命令。"""
+"""阶段 5 命令框架测试:注册/别名/执行/未知命令回退 + 内置命令。
+
+直接调 execute_cmd,不跑完整会话;/exit、未知命令经 chat() 的
+端到端剧本在 tests/integration/test_commands.py。
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from my_agent_alpha import LogManager, Message
-from my_agent_alpha.chat import chat
 from my_agent_alpha.commands import (
     command,
     execute_cmd,
@@ -15,7 +18,6 @@ from my_agent_alpha.commands import (
     unregister_command,
 )
 from my_agent_alpha.hooks import get_hooks  # /hooks 命令用
-from my_agent_alpha.llm.mock import set_scripted_replies
 
 
 def _manager(logdir: Path) -> LogManager:
@@ -104,33 +106,6 @@ def test_builtin_hooks(logdir: Path, capsys: pytest.CaptureFixture[str]) -> None
         assert "generation.post" in out
     else:
         assert "没有已注册的钩子" in out
-
-
-def test_e2e_exit_command_via_chat(logdir: Path, workspace: Path) -> None:
-    """chat() 装配了内置命令:/exit 结束会话(更新自旧版 test_exit_command)。"""
-    with pytest.raises(SystemExit):
-        chat(
-            ["/exit"],
-            logdir=logdir,
-            workspace=workspace,
-            model="mock/echo",
-            non_interactive=True,
-        )
-    manager = LogManager.load(logdir)
-    assert not any(m.role == "user" for m in manager.messages)  # 命令不进日志
-
-
-def test_e2e_unknown_command_treated_as_text(logdir: Path, workspace: Path) -> None:
-    set_scripted_replies(["收到"])
-    chat(
-        ["/神秘命令"],
-        logdir=logdir,
-        workspace=workspace,
-        model="mock/echo",
-        non_interactive=True,
-    )
-    manager = LogManager.load(logdir)
-    assert any(m.role == "user" and m.content == "/神秘命令" for m in manager.messages)
 
 
 def test_get_commands_lists_builtins() -> None:

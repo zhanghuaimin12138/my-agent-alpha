@@ -117,17 +117,6 @@ def test_no_gate_when_todos_clean(logdir: Path, workspace: Path) -> None:
     assert _gate_systems(logdir) == []
 
 
-def test_gate_silent_after_interrupt_marker(logdir: Path, workspace: Path) -> None:
-    """回合以中断/拒绝/失败标记收尾时,门控不催(用户已表态)。"""
-    manager = LogManager.load(logdir, create=True)
-    manager.append(Message("user", "做件事"))
-    manager.append(Message("assistant", "```todo\nadd 甲\n```"))
-    manager.append(Message("system", "[interrupted] 用户按了 Ctrl-C"))
-
-    produced = list(todo.todo_gate_hook(manager))
-    assert produced == []  # 清单未清也不注入
-
-
 def test_replay_rebuilds_state_from_log(logdir: Path, workspace: Path) -> None:
     """恢复会话:重放日志里的 todo 调用,精确重建清单(read/坏命令跳过)。"""
     manager = LogManager.load(logdir, create=True)

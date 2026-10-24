@@ -24,6 +24,18 @@ def workspace(tmp_path: Path) -> Iterator[Path]:
     yield d
 
 
+@pytest.fixture
+def clean_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """隔离的用户层数据目录(长期记忆测试用,别污染真实 ~/.local/share)。
+
+    返回 tmp 根:测试在它下面自建 ws/、logs/ 等子目录。
+    (XDG_DATA_HOME 其实在下面的 autouse 夹具里也会设,这里显式再设一遍,
+    让单独使用本夹具的测试不依赖 autouse 的存在。)
+    """
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    return tmp_path
+
+
 @pytest.fixture(autouse=True)
 def _reset_agent_state(
     workspace: Path, logdir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -53,6 +65,7 @@ def _reset_agent_state(
     clear_confirm_hooks()
     clear_hooks()
     todo_mod._reset_todos()  # todo 的清单/门控计数是模块级状态,不随注册表清空
+    context.clear_current_model()  # 模型也是 ContextVar:不清会泄漏给后面的测试
     with context.agent_context(workspace, logdir):
         yield
     llm_mock.clear_scripted()

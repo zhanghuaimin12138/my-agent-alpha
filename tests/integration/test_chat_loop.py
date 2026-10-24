@@ -1,31 +1,19 @@
-"""端到端循环测试:mock 脚本驱动完整的多步工具调用循环(离线)。"""
+"""端到端循环测试:mock 脚本驱动完整的多步工具调用循环(离线)。
+
+(原 tests/test_chat.py 的循环部分;exit/未知命令两个用例与
+test_commands.py 的 e2e 版本重复,统一收在那里。)
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from my_agent_alpha import LogManager, Message
-from my_agent_alpha.chat import has_runnable_tooluse
+from my_agent_alpha import LogManager
+from my_agent_alpha.chat import chat
 from my_agent_alpha.llm.mock import set_scripted_replies
 
 
-def test_has_runnable_tooluse(workspace: Path) -> None:
-    msgs = [
-        Message("system", "提示词"),
-        Message("user", "跑一下"),
-        Message("assistant", "执行:\n```shell\nls\n```"),
-        Message("system", "$ ls\na\nReturnCode: 0"),
-    ]
-    assert has_runnable_tooluse(msgs) is True  # 最后的 assistant 还有工具调用
-    msgs.append(Message("assistant", "完成了"))
-    assert has_runnable_tooluse(msgs) is False
-
-
 def test_full_turn_with_tool_call(logdir: Path, workspace: Path, capsys) -> None:  # type: ignore[no-untyped-def]
-    from my_agent_alpha.chat import chat
-
     set_scripted_replies(
         [
             "我来执行命令:\n```shell\necho hello-spine\n```",
@@ -69,8 +57,6 @@ def test_full_turn_with_tool_call(logdir: Path, workspace: Path, capsys) -> None
 
 
 def test_save_and_read_roundtrip(logdir: Path, workspace: Path) -> None:
-    from my_agent_alpha.chat import chat
-
     set_scripted_replies(
         [
             "先保存文件:\n```save hello.txt\n你好,脊柱\n```",
@@ -121,42 +107,7 @@ def test_max_steps_guard(logdir: Path, workspace: Path) -> None:
     assert assistant_count == 3
 
 
-def test_exit_command(logdir: Path, workspace: Path) -> None:
-    import pytest
-
-    from my_agent_alpha.chat import chat
-
-    with pytest.raises(SystemExit):
-        chat(
-            ["/exit"],
-            logdir=logdir,
-            workspace=workspace,
-            model="mock/echo",
-            non_interactive=True,
-        )
-    # /exit 不产生用户消息
-    manager = LogManager.load(logdir)
-    assert not any(m.role == "user" for m in manager.messages)
-
-
-def test_unknown_slash_treated_as_text(logdir: Path, workspace: Path) -> None:
-    from my_agent_alpha.chat import chat
-
-    set_scripted_replies(["收到"])
-    chat(
-        ["/unknown cmd"],
-        logdir=logdir,
-        workspace=workspace,
-        model="mock/echo",
-        non_interactive=True,
-    )
-    manager = LogManager.load(logdir)
-    assert any(m.role == "user" and m.content == "/unknown cmd" for m in manager.messages)
-
-
 def test_resume_session_reuses_log(logdir: Path, workspace: Path) -> None:
-    from my_agent_alpha.chat import chat
-
     set_scripted_replies(["第一轮完成"])
     chat(["第一轮"], logdir=logdir, workspace=workspace, model="mock/echo", non_interactive=True)
 
@@ -169,13 +120,3 @@ def test_resume_session_reuses_log(logdir: Path, workspace: Path) -> None:
     # 系统提示词只种了一次
     system_prompt_count = sum(1 for m in manager.messages if m.hide and m.role == "system")
     assert system_prompt_count == 2  # static + dynamic 两条
-
-
-def test_user_input_bad_unicode_cleaned(monkeypatch: pytest.MonkeyPatch) -> None:
-    """终端传来坏字符(落单代理)时入口先清洗,不让它进日志把程序写崩。"""
-    from my_agent_alpha.chat import _get_user_input
-
-    monkeypatch.setattr("builtins.input", lambda _: "\ud800有雨吗")
-    msg = _get_user_input()
-    assert msg is not None
-    assert msg.content == "?有雨吗"

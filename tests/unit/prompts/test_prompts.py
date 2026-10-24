@@ -50,3 +50,20 @@ def test_old_rule_merged_not_left_in_protocol() -> None:
     assert "6." not in text  # 协议列表只有 1-5,第 6 条内容并入了行动纪律
     # 行动纪律紧跟在协议之后,而不是躲在列表末尾(更显眼)
     assert text.index("# 工具调用协议") < text.index("# 行动纪律")
+
+
+# ---- 审查 #14:系统提示词内容 ----
+
+
+def test_prompt_contains_tool_docs_and_time() -> None:
+    from my_agent_alpha.tools import get_tools
+
+    msgs = get_prompt(get_tools())
+    assert len(msgs) == 2
+    static, dynamic = msgs
+    assert static.pinned and static.hide
+    assert "工具调用协议" in static.content
+    assert "## shell" in static.content
+    assert "## save" in static.content
+    assert "当前时间" in dynamic.content
+    assert "工具调用协议" not in dynamic.content

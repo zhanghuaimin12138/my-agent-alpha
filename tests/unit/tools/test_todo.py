@@ -1,10 +1,12 @@
 """todo 工具执行端单测:子命令文法、双通道取参、状态应用。
 
 不走 chat() 全流程,直接调 execute_todo / 辅助函数验证行为;
-门控与重放的端到端测试在 test_todo_gate.py。
+门控与重放的端到端测试在 tests/integration/test_todo_gate.py。
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from my_agent_alpha.message import Message
 from my_agent_alpha.tools import todo
@@ -106,3 +108,19 @@ def test_execute_returns_system_message() -> None:
     (msg,) = list(todo.execute_todo("read", None, None))
     assert isinstance(msg, Message)
     assert msg.role == "system"
+
+
+# ---- 门控钩子的跳过分支(门控的端到端剧本在 tests/integration/test_todo_gate.py)----
+
+
+def test_gate_silent_after_interrupt_marker(logdir: Path) -> None:
+    """回合以中断/拒绝/失败标记收尾时,门控不催(用户已表态)。"""
+    from my_agent_alpha import LogManager, Message
+
+    manager = LogManager.load(logdir, create=True)
+    manager.append(Message("user", "做件事"))
+    manager.append(Message("assistant", "```todo\nadd 甲\n```"))
+    manager.append(Message("system", "[interrupted] 用户按了 Ctrl-C"))
+
+    produced = list(todo.todo_gate_hook(manager))
+    assert produced == []  # 清单未清也不注入

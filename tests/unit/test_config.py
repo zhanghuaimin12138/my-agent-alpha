@@ -100,3 +100,23 @@ def test_effective_tool_format_and_max_steps(
     assert effective_tool_format(None, Config(tool_format="tool")) == "tool"
     assert effective_max_steps(Config(max_steps=7), env_default=50) == 7
     assert effective_max_steps(Config(), env_default=50) == 50
+
+
+# ---- MCP 服务器配置解析 ----
+
+
+def test_config_parses_mcp_servers(tmp_path: Path) -> None:
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "config.toml").write_text(
+        'model = "glm/glm-5.3"\n'
+        "[[mcp.servers]]\n"
+        'name = "weather"\n'
+        'command = "python"\n'
+        'args = ["-m", "weather_server"]\n',
+        encoding="utf-8",
+    )
+    config = Config.load(workspace=tmp_path / "ws", user_config_dir=cfg_dir)
+    assert len(config.mcp_servers) == 1
+    assert config.mcp_servers[0].name == "weather"
+    assert config.mcp_servers[0].args == ("-m", "weather_server")
