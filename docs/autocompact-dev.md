@@ -88,11 +88,11 @@
 ### 3.1 Message
 
 ```python
-@dataclass(frozen=True)   # frozen 重要：消息不可变，压缩用 replace 产生新实例
+@dataclass(frozen=True)  # frozen 重要：消息不可变，压缩用 replace 产生新实例
 class Message:
-    role: str          # "user" | "assistant" | "system"
+    role: str  # "user" | "assistant" | "system"
     content: str
-    pinned: bool = False   # 钉住的消息任何压缩阶段都跳过
+    pinned: bool = False  # 钉住的消息任何压缩阶段都跳过
     # replace(content=..., pinned=...) → 返回修改后的副本
 ```
 
@@ -106,8 +106,8 @@ class Message:
 ```python
 @dataclass
 class ModelInfo:
-    name: str        # 供 token 计数器选 tokenizer
-    context: int     # 上下文窗口大小（token 数）
+    name: str  # 供 token 计数器选 tokenizer
+    context: int  # 上下文窗口大小（token 数）
 ```
 
 引擎在拿不到默认模型时需要一个兜底 ModelInfo（gptme 用 gpt-4 的元数据）。移植时定义为常量即可，`context` 取目标项目的主力模型窗口。
