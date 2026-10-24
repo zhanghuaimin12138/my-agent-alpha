@@ -89,7 +89,11 @@ def spec_to_openai_tool(spec: ToolSpec) -> dict[str, object]:
     {"type": "function",
      "function": {"name": "shell",
                   "description": "在 bash 里执行命令……",
-                  "parameters": {"type": "object", ...}}}
+                  "parameters": {"type": "object",
+                                "properties": {"path": {"type": "string", "description": ...},
+                                                "content": {"type": "string", ...}},
+                                "required": ["path", "content"],
+                                "additionalProperties": False}}}
 
     说明:description 截断到 1000 字符 —— OpenAI 对函数描述有 1024 上限,
     超长直接 400(gptme 为此专门维护"精简版说明",我们先用截断)。

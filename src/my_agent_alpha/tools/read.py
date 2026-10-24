@@ -1,6 +1,6 @@
 """read 工具:读取文件内容(带行号)。
 
-用法(仿 gptme):路径既可写在 fence 头(单文件),也可写在代码块里(每行一个):
+用法:路径既可写在 fence 头(单文件),也可写在代码块里(每行一个):
 
     ```read src/main.py
     ```
@@ -52,8 +52,11 @@ def execute_read(
     """读取文件,输出带行号的内容。
 
     路径来源(三种,汇总去执行):
-    - markdown 通道:fence 头参数(单文件)+ 代码块每行一个路径;
-    - 原生通道:kwargs 的 path 参数(单文件)。
+    - markdown:
+        单文件:  code:none,      args:路径,kwargs:none;
+        多文件： code:list[路径],args:none,kwargs:none;
+    - 原生通道(单文件):kwargs:{"path":"路径"}
+
     相对路径相对工作区。
     """
     workspace = get_workspace()

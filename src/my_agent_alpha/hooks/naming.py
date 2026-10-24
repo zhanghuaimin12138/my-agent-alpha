@@ -33,7 +33,7 @@ from my_agent_alpha.message import Message
 # 标题最长保留多少字(模型偶尔啰嗦,超了硬截)
 _MAX_TITLE_CHARS = 30
 
-# meta.json 的文件名(标题存在会话目录旁边,目录名本身不动)
+# meta.json （会话元数据jsons文件）的文件名(标题存在会话目录旁边,目录名本身不动)
 _META_FILENAME = "meta.json"
 
 # 总开关(默认开):测试环境用 ALPHA_AUTO_NAME=0 关掉,防止命名调用
