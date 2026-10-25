@@ -16,9 +16,11 @@ def test_resolve_model_provider_split() -> None:
     assert meta.full == "deepseek/deepseek-chat"
 
 
-def test_resolve_model_bare_name_defaults_to_openai() -> None:
+def test_resolve_model_bare_name_uses_default_provider() -> None:
+    # 裸模型名不写服务商:归到 DEFAULT_PROVIDER(现在是 glm-coding)
     meta = resolve_model("gpt-4o-mini")
-    assert meta.provider == "openai"
+    assert meta.provider == "glm-coding"
+    assert meta.model == "gpt-4o-mini"
 
 
 def test_resolve_model_provider_default_model() -> None:
@@ -41,11 +43,12 @@ def test_resolve_model_glm_default_model() -> None:
 
 
 def test_glm_providers_table_entries() -> None:
-    # glm(按量计费)和 glm-coding(Coding Plan 订阅)端点不同,但共用 GLM_API_KEY 这把密钥
+    # glm(按量计费)和 glm-coding(Coding Plan 订阅)端点不同,密钥变量也不同:
+    # glm 读 GLM_API_KEY,glm-coding 读 ZHIPU_API_KEY
     assert PROVIDERS["glm"].base_url == "https://open.bigmodel.cn/api/paas/v4"
     assert PROVIDERS["glm-coding"].base_url == "https://open.bigmodel.cn/api/coding/paas/v4"
     assert PROVIDERS["glm"].api_key_env == "GLM_API_KEY"
-    assert PROVIDERS["glm-coding"].api_key_env == "GLM_API_KEY"
+    assert PROVIDERS["glm-coding"].api_key_env == "ZHIPU_API_KEY"
 
 
 def test_resolve_model_glm_coding_explicit_model() -> None:

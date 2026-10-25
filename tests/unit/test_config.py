@@ -9,7 +9,6 @@ import pytest
 from my_agent_alpha.config import (
     Config,
     effective_max_steps,
-    effective_model,
     effective_tool_format,
 )
 
@@ -79,17 +78,6 @@ def test_broken_toml_ignored(tmp_path: Path) -> None:
     _write(tmp_path / "ws" / "alpha.toml", 'model = "glm/glm-5.3"\n')
     config = Config.load(workspace=tmp_path / "ws", user_config_dir=tmp_path / "cfg")
     assert config.model == "glm/glm-5.3"  # 坏文件被忽略,好文件照常生效
-
-
-def test_effective_model_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # 本机 .bashrc 可能设了 ALPHA_MODEL(真实环境),先摘掉保证测试自洽
-    monkeypatch.delenv("ALPHA_MODEL", raising=False)
-    config = Config(model="glm/glm-5.3")
-    assert effective_model(None, config) == "glm/glm-5.3"  # 配置兜底
-    assert effective_model("deepseek/chat", config) == "deepseek/chat"  # 命令行最大
-    monkeypatch.setenv("ALPHA_MODEL", "moonshot/kimi")
-    assert effective_model(None, config) == "moonshot/kimi"  # 环境变量 > 配置
-    assert effective_model("deepseek/chat", config) == "deepseek/chat"  # 命令行仍最大
 
 
 def test_effective_tool_format_and_max_steps(

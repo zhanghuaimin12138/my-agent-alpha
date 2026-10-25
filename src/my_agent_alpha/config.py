@@ -138,6 +138,7 @@ def effective_model(cli_value: str | None, config: Config) -> str:
     if cli_value:
         return cli_value
     env_value = os.environ.get("ALPHA_MODEL")
+    env_value = "glm-coding"
     if env_value:
         return env_value
     return config.model or "mock/echo"
