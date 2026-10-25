@@ -170,6 +170,26 @@ def test_reason_empty_body_variants() -> None:
         assert "没有正文" in reason
 
 
+def test_reason_calls_inside_think() -> None:
+    """真机翻车样本 2026-1024-e6480f:调用写进了思考区、正文为空。
+
+    模型两次都"以为自己在调用"(调用行其实包在 <think> 里),泛泛提醒
+    没点中病因,回合死掉 —— 检测器必须点名"思考区"。
+    """
+    # 原生调用形态(实录原样裁剪:@read/@shell 都在思考区里,正文为空)
+    native = (
+        '<think>Let me actually make the tool calls.@read(call_x): {"path": "/tmp/a"}\n'
+        '@shell(call_y): {"command": "ls"}\n</think>'
+    )
+    reason = missed_tooluse_reason([Message("assistant", native)])
+    assert reason is not None and "思考区" in reason
+    # markdown 通道:思考里写了语言标记对得上已知工具的围栏,同样点名
+    add_tools((_make_tool("fence.demo", "fencedemo"),))
+    fenced = "<think>看看目录:\n```fencedemo\nls\n```\n</think>"
+    reason = missed_tooluse_reason([Message("assistant", fenced)])
+    assert reason is not None and "思考区" in reason
+
+
 def test_reason_normal_replies_pass() -> None:
     """正常最终回答、可执行调用、以及和工具无关的示例代码块,都不触发。"""
     assert missed_tooluse_reason([Message("assistant", "任务完成,无需工具。")]) is None

@@ -33,6 +33,22 @@ def test_clean_title_strips_quotes_and_lines() -> None:
     assert _clean_title("") == ""
 
 
+def test_clean_title_strips_think() -> None:
+    """思考型模型的输出先思考再给标题:思考区不能进 meta.json。
+
+    真机翻车样本 2026-1024-e6480f:模型在思考里复述命名指令,
+    原样截 30 字存成了标题,真标题被丢掉。
+    """
+    # 先思考、换行、再标题:只留标题
+    assert _clean_title("<think>用户要求给对话起标题</think>\n制定agent开发计划") == (
+        "制定agent开发计划"
+    )
+    # 标题紧跟 </think> 同一行
+    assert _clean_title("<think>想想…</think>修登录页") == "修登录页"
+    # 只有思考、或思考没写完:剥完是空,交给上层"下回合再试"
+    assert _clean_title("<think>用户要求给对话起标题") == ""
+
+
 def test_title_roundtrip_and_corrupt_meta(tmp_path: Path) -> None:
     """标题写入后能读回;损坏的 meta.json 读成 None 而不是崩。"""
     assert read_session_title(tmp_path) is None  # 还没写
@@ -70,6 +86,22 @@ def test_hook_skips_when_no_assistant_yet(logdir: Path, monkeypatch: pytest.Monk
 
     assert list(naming_hook(manager)) == []
     assert read_session_title(logdir) is None
+
+
+def test_hook_names_think_style_reply(
+    logdir: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """端到端:思考型回复(先 <think> 再标题)也能存进干净标题。"""
+    monkeypatch.setenv("ALPHA_AUTO_NAME", "1")
+    manager = LogManager.load(logdir, create=True)
+    manager.append(Message("user", "制定开发计划"))
+    manager.append(Message("assistant", "好的,计划如下……"))
+    set_current_model("mock/echo")
+    set_scripted_replies(["<think>用户要求起标题</think>\n制定agent开发计划"])
+
+    assert list(naming_hook(manager)) == []
+    assert read_session_title(logdir) == "制定agent开发计划"
+    assert "会话已命名:制定agent开发计划" in capsys.readouterr().out
 
 
 # ---- /log 显示 ----

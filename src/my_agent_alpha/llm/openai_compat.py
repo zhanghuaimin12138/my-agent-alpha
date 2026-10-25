@@ -232,7 +232,7 @@ def _stream_once(
 
     模型的回复一小段一小段到达,每段立刻 yield 出去;
     思考内容(reasoning_content)在第一段到达前先发一个 "<think>" 标记,
-    正文开始时发 "</think>",这样接收方就能区分思考和正文;
+    正文或工具调用行开始时发 "</think>",这样接收方就能区分思考和正文;
     原生工具调用开启时(tools 非空),模型的 tool_calls 分片在这里拼装,
     参数 JSON 一凑齐就产出 "@工具名(编号): {参数}" 行 —— 和思考/正文
     混在同一条文本流里,下游解析不用分情况;
@@ -317,11 +317,19 @@ def _stream_once(
                 and acc["args"].startswith("{")  # 参数是个 JSON 对象
                 and find_json_end(acc["args"], 0) == len(acc["args"])  # 大括号恰好闭合到末尾
             )
-            if args_ready:
+            if args_ready:  # 拼装完成，检查args是否符合json语法，符合就yield
                 try:
-                    json.loads(acc["args"])  # json解析，出错就丢
+                    json.loads(acc["args"])  # json解析(符合json语法即可)，出错就丢
                 except json.JSONDecodeError:
                     continue
+                if in_think:
+                    # 调用行属于正文,不属于思考:产出前先闭合思考区。
+                    # 不然调用行会落进 <think>...</think> 里,下游剥思考区
+                    # 时把它连同草稿一起扔掉 —— 模型明明正经发起了原生函数
+                    # 调用,却像消失了一样(真机翻车样本 2026-1024-e6480f:
+                    # 思考后直接跟调用、中间没有正文,两次调用全部失踪)
+                    yield "</think>"
+                    in_think = False
                 yield f"@{acc['name']}({acc['id']}): {acc['args']}\n"  # yield工具调用：str()
                 acc["done"] = "1"
 

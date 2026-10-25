@@ -182,3 +182,40 @@ def test_native_channel_nudge_wording(logdir: Path, workspace: Path) -> None:
     nudge = next(c for c in contents if c.startswith(NUDGE_PREFIX))
     assert "函数调用" in nudge
     assert "```" not in nudge  # 原生通道不该教围栏写法
+
+
+def test_calls_inside_think_nudged_and_recovers(
+    logdir: Path, workspace: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """真机翻车样本 2026-1024-e6480f 复现:调用写进思考区 → 点名提醒 → 恢复。
+
+    泛泛的"请发起函数调用"救不了这种模型 —— 它自以为已经调用了,
+    提醒必须说出病因:调用在思考区里、要写在 </think> 之后的正文里。
+    """
+    set_scripted_replies(
+        [
+            # 第一次:调用行全包在 <think> 里(实录原样裁剪)
+            '<think>我需要看看环境。@shell(call_1): {"command": "echo hi"}</think>',
+            # 被点名提醒后:同样的调用写在正文里(思考区外)
+            '@shell(call_2): {"command": "echo hi"}',
+            "命令输出 hi,任务完成。",
+        ]
+    )
+    chat(
+        ["跑一下 echo"],
+        logdir=logdir,
+        workspace=workspace,
+        model="mock/echo",
+        non_interactive=True,
+        tool_format="tool",
+    )
+    contents = [m.content for m in LogManager.load(logdir).messages]
+    nudge_idx = next(i for i, c in enumerate(contents) if c.startswith(NUDGE_PREFIX))
+    nudge = contents[nudge_idx]
+    assert "思考区" in nudge and "</think>" in nudge  # 点中病因 + 教正确位置
+    # 提醒生效:调用挪出思考区后真的执行了,回合正常收尾
+    assert any("$ echo hi" in c for c in contents[nudge_idx:])
+    assert any(
+        m.role == "assistant" and m.content == "命令输出 hi,任务完成。"
+        for m in LogManager.load(logdir).messages
+    )
