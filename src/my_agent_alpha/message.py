@@ -1,6 +1,6 @@
 """消息类型 —— 整个系统唯一的数据单元。
 
-仿 gptme 的核心约定(见 docs/gptme-study.md 支柱一):
+核心约定(见 docs/gptme-study.md 支柱一):
 
 - 只有三种 role(system/user/assistant),没有单独的"工具调用"/"工具输出"消息类型;
 - 工具调用内嵌在 assistant 的 content 文本里(将来的 ToolUse 解析器负责识别);
