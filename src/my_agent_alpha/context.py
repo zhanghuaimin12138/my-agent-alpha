@@ -49,6 +49,15 @@ def set_current_model(model: str) -> None:
     _model_var.set(model)
 
 
+def clear_current_model() -> None:
+    """清掉当前模型记录,恢复成"没设置过"。
+
+    给测试隔离用:chat() 会设模型,不清掉的话,
+    后面跑的测试会看到上一个测试留下的模型。
+    """
+    _model_var.set(None)
+
+
 @contextmanager
 def agent_context(workspace: Path, logdir: Path | None) -> Iterator[None]:
     """临时设置工作区和会话目录,离开 with 块后自动恢复原值。

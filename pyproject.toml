@@ -54,3 +54,6 @@ mypy_path = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# importlib 导入模式:允许 unit/ 与 integration/ 两棵树里出现同名测试文件
+# (如 unit/hooks/test_hooks.py 与 integration/test_hooks.py),按路径区分模块
+addopts = "--import-mode=importlib"

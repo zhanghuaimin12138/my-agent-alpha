@@ -41,8 +41,24 @@
 - 消息不可变:修改 = 构造新实例。
 - call_id 纪律从第一天保持:每个结构化工具调用恰好配一个结果。
 
+## 测试目录规则
+
+- **单元测试放 `tests/unit/`,目录树与 `src/my_agent_alpha/` 一一镜像**:
+  源码 `src/my_agent_alpha/tools/edit.py` 的测试在 `tests/unit/tools/test_edit.py`;
+  autocompact 子包同理(`tests/unit/autocompact/test_engine.py`)。
+- **测包门面时文件用包名**:比如工具注册表的行为由 `tools/__init__.py` 导出,
+  测试叫 `tests/unit/tools/test_tools.py`;LLM 的 reply 入口叫 `tests/unit/llm/test_llm.py`。
+- **集成测试放 `tests/integration/`,按场景命名**,不对应单个源码文件:
+  走完整 chat() 循环的剧本、真实子进程、MCP 连接都算集成
+  (`test_chat_loop.py`、`test_subagent.py`、`test_mcp.py`)。
+- **判定标准看"测的是什么",不看用什么驱动**:目标是"一个模块的函数/类"
+  → 单元;目标是"多个模块装配后的行为" → 集成。用 mock provider 不改变归属。
+- 共享夹具放 `tests/conftest.py`(logdir / workspace / clean_dirs,两棵树都生效);
+  测试辅助脚本(如 `mcp_echo_server.py`)跟使用它的集成测试同目录。
+- 两棵树允许同名文件(pytest 已配 `--import-mode=importlib`,按路径区分模块)。
+
 ## 常用任务
 
 - **跑全部检查**:`uv run pytest && uv run ruff check . && uv run mypy src`
-- **加一个模块**:在 `src/my_agent_alpha/` 下建文件 + 对应 `tests/test_*.py`;导出走包 `__init__`
+- **加一个模块**:在 `src/my_agent_alpha/` 下建文件 + `tests/unit/<镜像路径>/test_<模块>.py`;导出走包 `__init__`
 - **对照 gptme 原实现**:读 `/tmp/gptme/gptme/` 下的对应模块,研究报告有 file:line 索引

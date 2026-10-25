@@ -158,6 +158,10 @@ _ANNOUNCE_WORDS = ("这就", "马上", "稍等", "let me", "i'll ")
 # (真机实录:dashscope 的编号带点号,曾让严格正则整行失配,调用静默丢失)
 _LOOSE_NATIVE_CALL_RE = re.compile(r"@[A-Za-z0-9_.\-]+\([^)]*\)\s*:\s*\{")
 
+# 抓围栏开栏的语言标记(```shell 的 "shell" 部分):判断"正文全空、思考里
+# 却写了能对上已知工具的围栏"时用(见 missed_tooluse_reason 分支 1)
+_FENCE_LANG_RE = re.compile(r"```(\S+)")
+
 
 def _resembles_known_tool(langtag: str) -> bool:
     """判断一个围栏语言标记是不是"某个已知工具名写岔了的近亲"。
@@ -184,6 +188,9 @@ def missed_tooluse_reason(messages: Sequence[Message]) -> str | None:
     覆盖五种真实踩过的坑(真机实录见 docs/tmp.jsonl 与踩坑记录条目 4/5):
     1. 正文为空:整个回复只有 <think> 思考(思考里甚至写着"我来调用工具"),
        或干脆一个字都没有 —— 模型把"打算调用"当成了"已经调用";
+       其中"思考里已经写出调用形态(@调用行/工具围栏)"要单独点名
+       "调用写在了思考区里"(真机 2026-1024-e6480f:模型两次都把
+       @read/@shell 写进 <think>,泛泛提醒没点中病因,回合死掉);
     2. 围栏写了,语言标记却不认识:如工具叫 websearch.search、模型写
        ```websearch —— 这种块会被解析器静默忽略,不提醒就永远没人发现;
     3. 正文以冒号结尾(如"现在为您查询:"):话说一半戛然而止,
@@ -207,6 +214,14 @@ def missed_tooluse_reason(messages: Sequence[Message]) -> str | None:
         return None
     body = strip_think(content).strip()
     if not body:
+        # 正文全空,整个回复只剩思考区:在这里面扫到"调用形态"(宽松版
+        # @调用行、或语言标记对得上已知工具的围栏)就一定在思考里 ——
+        # 模型其实已经写出了调用,只是位置不对,要单独点名"思考区"
+        if _LOOSE_NATIVE_CALL_RE.search(content) or any(
+            get_tool_for_langtag(lang) is not None for lang in _FENCE_LANG_RE.findall(content)
+        ):
+            # 不用括号:这段话会被拼进提醒消息的括号里,嵌套括号看着难受
+            return "回复没有正文,工具调用全写在了 <think> 思考区里"
         # 不用括号:这段话会被拼进提醒消息的括号里,嵌套括号看着难受
         return "回复没有正文,只有思考过程或完全为空"
     has_fence = "```" in body  # 有没有围栏代码块(检测器多个分支都要用)
@@ -253,6 +268,8 @@ def _make_nudge(reason: str, tool_format: str) -> Message:
     它会进日志、发给模型、也打印到终端 —— 踩坑记录的教训:"该有调用
     却解析出 0 个"这种事绝不能静默,用户和模型都得看见。
     两种通道措辞不同:markdown 通道教围栏写法,原生通道提醒用函数调用。
+    特殊病灶"调用写进了思考区"单独措辞:模型其实已经写出了调用,
+    教它"别只用文字描述"等于说反了,要点名"把调用挪出思考区"。
     """
     if tool_format == "markdown":
         how = (
@@ -260,13 +277,22 @@ def _make_nudge(reason: str, tool_format: str) -> Message:
             "```shell\nls -la\n```\n"
             "带参数的工具把参数写在工具名后面,例如 ```save path/to/file.txt。"
         )
+        middle = '只在思考里"打算调用"、或只用文字描述要做什么,工具都不会执行。' + how
     else:
-        how = "请直接发起对应的函数调用(function calling),不要只用文字描述。"
+        middle = (
+            '只在思考里"打算调用"、或只用文字描述要做什么,工具都不会执行。'
+            "请直接发起对应的函数调用(function calling),不要只用文字描述。"
+        )
+    if "思考区里" in reason:
+        middle = (
+            "思考区会被整体剥离,里面的调用不会被执行;你其实已经写出了"
+            "调用,只是位置不对 —— 请把同样的调用写在 </think> 之后的正文里,"
+            "不要包进思考区。"
+        )
     return Message(
         "system",
         f"{NUDGE_PREFIX} 你上一条回复没有产生任何工具调用({reason})。"
-        '只在思考里"打算调用"、或只用文字描述要做什么,工具都不会执行。'
-        f"{how}"
+        f"{middle}"
         "如果任务确实无需工具,请直接给出完整的最终回答(不要停在半句话上)。",
     )
 

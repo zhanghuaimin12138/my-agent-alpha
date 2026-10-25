@@ -24,6 +24,7 @@ import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
+from my_agent_alpha.codeblock import strip_think
 from my_agent_alpha.context import get_current_model
 from my_agent_alpha.hooks import HookType, register_hook
 from my_agent_alpha.llm import reply
@@ -33,7 +34,7 @@ from my_agent_alpha.message import Message
 # 标题最长保留多少字(模型偶尔啰嗦,超了硬截)
 _MAX_TITLE_CHARS = 30
 
-# meta.json 的文件名(标题存在会话目录旁边,目录名本身不动)
+# meta.json （会话元数据jsons文件）的文件名(标题存在会话目录旁边,目录名本身不动)
 _META_FILENAME = "meta.json"
 
 # 总开关(默认开):测试环境用 ALPHA_AUTO_NAME=0 关掉,防止命名调用
@@ -75,8 +76,14 @@ def _make_title_prompt(messages: Sequence[Message]) -> str:
 
 
 def _clean_title(raw: str) -> str:
-    """把模型给的标题收拾干净:取首行、剥引号、限长。"""
-    title = raw.strip().split("\n")[0].strip()
+    """把模型给的标题收拾干净:先剥思考区,再取首行、剥引号、限长。
+
+    思考模型可能先输出一大段 <think> 再给标题(真机翻车样本
+    2026-1024-e6480f:模型在思考里复述命名指令,原样截 30 字存进了
+    meta.json,真标题反而被丢掉)。先剥思考区:剥完剩空(只有思考、
+    或思考没写完)就返回空串,让上层"下回合再试"。
+    """
+    title = strip_think(raw).strip().split("\n")[0].strip()
     title = title.strip("\"'“”‘’「」『』《》〈〉 ")
     return title[:_MAX_TITLE_CHARS]
 

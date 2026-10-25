@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+tmp
 .vscode
 
 # Virtual environments
@@ -21,3 +22,6 @@ htmlcov/
 
 # Environment
 .env
+
+# 评测产物(一次运行一个目录,只留机器可读的 summary 想入库再说)
+evals/toolcall_results/

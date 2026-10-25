@@ -128,7 +128,13 @@ def _apply_edit(path: Path, old: str, new: str) -> str:
 def execute_edit(
     code: str | None, args: list[str] | None, kwargs: dict[str, str] | None
 ) -> Iterator[Message]:
-    """edit 工具的执行函数:解析旧/新文本 → 精确替换 → 原子写回。"""
+    """edit 工具的执行函数:解析旧/新文本 → 精确替换 → 原子写回。
+
+    markdown:
+        code(content):内容 ; args:路径 ;kwargs: none
+    native:
+        kwargs: {"path": " ", "old": "content1" , "new" : "context2"}
+    """
     path_str = (kwargs.get("path") if kwargs else None) or (args[0] if args else "")
     if not path_str:
         yield Message("system", "错误: edit 需要文件路径(fence 头或 path 参数)")
