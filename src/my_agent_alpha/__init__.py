@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> None:
         effective_model,
         effective_tool_format,
     )
-    from my_agent_alpha.dirs import get_logs_dir
+    from my_agent_alpha.dirs import get_session_root
     from my_agent_alpha.tools import restrict_tools
 
     prompts = list(args.prompts)
@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> None:
     chat_mod.MAX_STEPS = effective_max_steps(config, chat_mod.MAX_STEPS)
 
     session_name = args.name or generate_conversation_id()
-    logdir = get_logs_dir() / session_name
+    logdir = get_session_root(args.workspace) / session_name
     if args.name:
         # 用户起名的会话:直接把名字写成标题,/log list 统一显示
         from my_agent_alpha.hooks.naming import write_session_title

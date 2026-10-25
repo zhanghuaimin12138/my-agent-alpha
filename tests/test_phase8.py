@@ -452,8 +452,11 @@ def test_subagent_tool_spawns_and_returns(tmp_path: Path, monkeypatch: pytest.Mo
     assert any("已派出子代理" in t for t in texts)
     final = texts[-1]
     assert "子代理" in final and "Echo" in final  # 子代理的回复回来了
-    # 子代理的会话日志真的在磁盘上
-    sub_dirs = [d for d in (tmp_path / "logs").iterdir() if d.name.startswith("subagent-")]
+    # 子代理的会话日志真的在磁盘上(在"工作区键/logs"这个会话根下面)
+    from my_agent_alpha.dirs import get_session_root
+
+    session_root = get_session_root(tmp_path / "ws")
+    sub_dirs = [d for d in session_root.iterdir() if d.name.startswith("subagent-")]
     assert len(sub_dirs) == 1
 
 

@@ -246,11 +246,9 @@ def test_load_missing_without_create_raises(logdir: Path) -> None:
 
 def test_conversation_id_format() -> None:
     cid = generate_conversation_id()
-    # YYYY-MMDD-<6 位十六进制>
-    parts = cid.split("-")
-    assert len(parts) == 3
-    assert len(parts[0]) == 4 and len(parts[1]) == 4 and len(parts[2]) == 6
-    int(parts[2], 16)  # 合法十六进制
+    # uuid4 的 32 位十六进制
+    assert len(cid) == 32
+    int(cid, 16)  # 合法十六进制
 
 
 def test_empty_then_write_produces_valid_empty_reload(logdir: Path) -> None:

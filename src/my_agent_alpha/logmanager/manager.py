@@ -1,6 +1,6 @@
 """会话日志:把对话保存成 JSONL 文件(每行一条消息的 JSON),只增不改。
 
-仿 gptme LogManager 的持久化设计,核心解决两个问题:
+LogManager 的持久化设计,核心解决两个问题:
 
 1. 怎么写得快?—— 追加游标(见 Log 类):平时只在文件末尾追加新消息,
    不重写整个文件;一旦发现文件或内存被意外改动,立即退回安全的"全量重写"。
@@ -21,9 +21,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import secrets
+import uuid
 from collections.abc import Iterable, Iterator, Sequence
-from datetime import datetime
 from pathlib import Path
 
 from my_agent_alpha.message import Message, clean_bad_unicode
@@ -34,11 +33,15 @@ CONVERSATION_FILENAME = "conversation.jsonl"
 
 
 def generate_conversation_id() -> str:
-    """生成一个会话目录名,形如 "2026-0929-a3f1c2"(日期 + 随机码,保证不重名)。
+    """生成会话目录名:uuid4 的 32 位随机十六进制。
 
-    示例:logdir = 日志根目录 / generate_conversation_id()
+    为什么不含日期:跨天续聊的会话,文件名里的日期会撒谎;
+    看时间交给 /log list,认会话靠标题。
+
+    示例:logdir = 会话根目录 / generate_conversation_id()
+        logdir = ~/.local/share/my-agent-alpha/projects/<工作区键>/logs/6f0c…
     """
-    return datetime.now().strftime("%Y-%m%d") + "-" + secrets.token_hex(3)
+    return uuid.uuid4().hex
 
 
 def _jsonl_line(msg: Message) -> bytes:
@@ -89,10 +92,9 @@ class Log:
     def __init__(self, messages: Iterable[Message] = ()) -> None:
         """新建 Log,可以带一批初始消息;游标为空(还没写过盘)。"""
         self._messages: list[Message] = list(messages)
-        # 已落盘的消息(书签的"读到第几页")。比较时用 is(是不是同一个对象),
-        # 不用 ==(内容相同不代表是同一条,比如复制出来的新消息)
-        self._persisted: list[Message] = []
-        self._persisted_path: Path | None = None
+
+        self._persisted: list[Message] = []  # 已持久化到日志的消息
+        self._persisted_path: Path | None = None  # 持久化日志的路径
         self._persisted_size: int = -1  # 上次写完时文件的大小(字节);-1 表示还没写过
 
     # ---- 只读访问 ----
@@ -114,7 +116,7 @@ class Log:
         """按下标取消息:log[0] 是第一条。"""
         return self._messages[index]
 
-    # ---- 修改 ----
+    # ---- 内存修改 ----
 
     def append(self, msg: Message) -> None:
         """在内存里追加一条消息(注意:还没写盘,写盘调用 write_jsonl)。"""
@@ -127,12 +129,15 @@ class Log:
 
         1. 上次就是写到这个文件,且知道写到第几字节(书签有效);
         2. 文件现在的字节数 == 书签记录的字节数(没被别的程序动过);
-        3. 书签记录的那批消息,现在仍然是列表开头的那批对象(内存没被改过);
+        3. 书签记录的已经持久化的那批消息,现在仍然是内存日志(self._messages)
+           开头的那批对象(内存没被改过);
         4. 文件最后一个字节是换行符(上次不是写到一半崩的)。
         """
+        # 路径对不上或者书签没有使用过（_persisted_size=-1）
         if self._persisted_path != path or self._persisted_size < 0:
             return False
         try:
+            # 现在日志的字节数和内存中的书签数对不上
             if path.stat().st_size != self._persisted_size:
                 return False  # 文件被外部截断/追加/替换
         except OSError:
@@ -159,7 +164,7 @@ class Log:
         self._persisted_size = path.stat().st_size
 
     def write_jsonl(self, path: Path, *, sync: bool = False) -> None:
-        """把消息写入文件。安全时只追加新消息(快),不安全时全部重写(慢但保险)。
+        """把内存消息写入持久化日志。安全时只追加新消息(快),不安全时全部重写(慢但保险)。
 
         示例:
             log = Log.read_jsonl(f); log.append(m); log.write_jsonl(f)
@@ -182,10 +187,9 @@ class Log:
         self._after_write(path)
 
     def _rewrite_jsonl(self, path: Path) -> None:
-        """把全部消息重写进文件:先写临时文件,再一步替换旧文件。
+        """内存日志全量持久化
 
-        也就是写临时文件，之后整体替换。
-
+        先写临时文件,再一步替换旧文件。
         为什么这样安全:os.replace 是"原子"操作 —— 要么成功(新文件顶上),
         要么失败(旧文件原样保留),不存在替换到一半的状态。
         所以哪怕写到一半断电,磁盘上也总有至少一份完整日志。
@@ -246,6 +250,7 @@ class LogManager:
     """管理"一个会话目录"的入口:负责打开/新建会话、追加消息并落盘。
 
     目录结构:
+        logdir:./.local/share/my-agent-alpha/projects/<工作区键>/logs/会话id/
         日志根目录/<会话id>/conversation.jsonl   ← 对话的全部消息,一行一条
 
     一般不需要直接用 Log,用 LogManager 即可:
@@ -311,8 +316,8 @@ class LogManager:
 
         sync=True 时额外强制刷盘,用于会话结束等关键时刻(平时不用)。
         """
-        self._log.append(msg)
-        self.write(sync=sync)
+        self._log.append(msg)  # 追加内存
+        self.write(sync=sync)  # 持久化日志
 
     def write(self, *, sync: bool = False) -> None:
         """把当前消息写盘(追加还是重写,Log 内部自己判断)。"""

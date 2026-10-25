@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from my_agent_alpha.commands import CommandContext, command
@@ -48,17 +49,25 @@ def tools_cmd(ctx: CommandContext) -> None:
 
 @command("log")
 def log_cmd(ctx: CommandContext) -> None:
-    """/log:当前会话信息;/log list 列出全部会话(目录名 + 标题)。"""
+    """/log:当前会话信息;/log list 列出全部会话(时间 + 标题,新→旧)。"""
     from my_agent_alpha.hooks.naming import read_session_title
 
     if ctx.args and ctx.args[0] == "list":
         logs_root = ctx.manager.logdir.parent
-        sessions = sorted(p for p in logs_root.iterdir() if p.is_dir())
+        # 目录名是 uuid(机器看的),排序靠修改时间,认会话靠标题
+        sessions = sorted(
+            (d for d in logs_root.iterdir() if d.is_dir()),
+            key=lambda d: d.stat().st_mtime,
+            reverse=True,
+        )
         if not sessions:
             print("  (还没有任何会话)")
             return
         for d in sessions:
-            print(f"  {d.name:<22} {read_session_title(d) or '(未命名)'}")
+            ts = datetime.fromtimestamp(d.stat().st_mtime)
+            # 注意不能用 title 当变量名:下面的分支会给同名变量赋 None,mypy 会抗议
+            shown = read_session_title(d) or "(未命名)"
+            print(f"  {ts:%m-%d %H:%M}  {shown}  ({d.name[:8]})")
         return
     title = read_session_title(ctx.manager.logdir)  # 可能还没命名(None)
     print(f"  会话目录:{ctx.manager.logdir}")

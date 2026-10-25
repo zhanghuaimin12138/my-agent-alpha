@@ -131,5 +131,6 @@ def test_log_list_shows_all_sessions(logdir: Path, capsys: pytest.CaptureFixture
     log_cmd(CommandContext(args=["list"], full="list", manager=manager, model="mock/echo"))
 
     out = capsys.readouterr().out
-    assert logdir.name in out and "当前会话" in out
-    assert "2026-1006-abcdef" in out and "(未命名)" in out
+    # 列表只显示 uuid 前 8 位,认会话靠标题
+    assert logdir.name[:8] in out and "当前会话" in out
+    assert "2026-100" in out and "(未命名)" in out

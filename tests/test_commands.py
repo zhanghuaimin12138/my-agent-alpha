@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -94,6 +95,27 @@ def test_builtin_log_and_model(logdir: Path, capsys: pytest.CaptureFixture[str])
     out = capsys.readouterr().out
     assert "消息条数:1" in out  # 种子消息 0 + 用户 1
     assert "glm/glm-5.3" in out
+
+
+def test_builtin_log_list_shows_title_and_mtime(
+    logdir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """/log list:按修改时间倒序(新→旧),显示标题 + uuid 前 8 位。"""
+    from my_agent_alpha.hooks.naming import write_session_title
+
+    root = logdir.parent
+    older = root / "aaaa1111aaaa1111aaaa1111aaaa1111"
+    newer = root / "bbbb2222bbbb2222bbbb2222bbbb2222"
+    older.mkdir()
+    newer.mkdir()
+    write_session_title(older, "旧会话")
+    write_session_title(newer, "新会话")
+    os.utime(older, (1_000_000_000, 1_000_000_000))  # 2001 年
+    os.utime(newer, (2_000_000_000, 2_000_000_000))  # 2033 年
+    assert execute_cmd("/log list", _manager(logdir), "mock/echo") is True
+    out = capsys.readouterr().out
+    assert out.index("新会话") < out.index("旧会话")  # 新的排前面
+    assert "bbbb2222" in out  # uuid 前 8 位
 
 
 def test_builtin_hooks(logdir: Path, capsys: pytest.CaptureFixture[str]) -> None:
