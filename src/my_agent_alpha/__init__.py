@@ -36,7 +36,7 @@ def main(argv: list[str] | None = None) -> None:
     """控制台入口:解析参数 → 装配会话 → 进入对话循环。"""
     parser = argparse.ArgumentParser(
         prog="my-agent-alpha",
-        description="个人 AI agent(仿 gptme 的学习型重实现)",
+        description="个人 AI agent(学习型重实现)",
     )
     parser.add_argument("prompts", nargs="*", help="开场提示词;缺省进入交互模式")
     parser.add_argument(
