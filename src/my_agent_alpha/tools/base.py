@@ -46,7 +46,7 @@ ExecuteFunc = Callable[
 
 @dataclass(frozen=True)
 class Parameter:
-    """工具的一个参数声明(给原生工具调用生成 JSON Schema 用)。
+    """工具的一个参数声明(用于参数列表->json scheme)。
 
     示例:Parameter("path", "string", "要保存的文件路径") 表示
     "名为 path 的字符串参数,必填"。
@@ -158,6 +158,8 @@ class ToolSpec:
 # 编号字符集必须允许点号:有的服务商(dashscope/kimi)给的调用编号长这样
 # "websearch.search_0_a475cfc6"(工具名_序号_哈希,工具名本身带点),
 # 不许点号会导致整行识别失败、调用被静默丢弃(踩坑记录条目 5)
+# 匹配 @ + (A-Za-z0-9_.\-) + ( + (A-Za-z0-9_.\-) + ) + 若干空格 + :
+# 匹配原生调用头
 _NATIVE_CALL_RE = re.compile(r"@([A-Za-z0-9_.\-]+)\(([A-Za-z0-9_.\-]*)\)\s*:")
 
 
@@ -328,11 +330,11 @@ class ToolUse:
                     )
                 )
 
-        regions = fenced_regions(content)  # 围栏内的 @xxx 是示例,跳过
+        regions = fenced_regions(content)  # 得到围栏代码块区间list,落在围栏内的 @xxx 是示例,跳过
         for match in _NATIVE_CALL_RE.finditer(content):
             if any(a <= match.start() < b for a, b in regions):
                 continue
-            # 冒号后面应该紧跟一个 {,开始数配对大括号
+            # 冒号后面应该紧跟一个" {",开始数配对大括号
             brace = match.end()
             while brace < len(content) and content[brace] in " \t":
                 brace += 1
@@ -342,7 +344,7 @@ class ToolUse:
             if end < 0:
                 continue  # JSON 没闭合:还没写完,先不要
             try:
-                kwargs = json.loads(content[brace:end])
+                kwargs = json.loads(content[brace:end])  # 通过json来初步校验格式。
             except json.JSONDecodeError:
                 continue  # JSON 坏了:不是有效调用,跳过
             if not isinstance(kwargs, dict):
