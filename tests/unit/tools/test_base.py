@@ -1,13 +1,15 @@
 """tools/base.py 测试:ToolUse 解析(两条通道 + think 剥离)、参数表转 JSON Schema。
 
 覆盖点:
-- markdown 通道:围栏在行首才认、块头参数、多块按出现顺序、未知语言忽略、
-  没闭合丢弃、行内代码不算围栏;
-- 原生通道:@工具名(编号): {JSON} 行、JSON 没闭合忽略、围栏里的是示例、
-  未知工具忽略、编号可省略;
+- markdown 通道:围栏在行首才认、块头参数(多词是一段)、多块按出现顺序、
+  未知语言忽略、没闭合丢弃、行内代码不算围栏;
+- 原生通道:@工具名(编号): {JSON} 行、JSON 没闭合忽略、围栏里的
+  (含未闭合围栏)是示例、未知工具忽略、编号可省略、冒号后须紧跟 {、
+  工具名可带点(MCP 前缀);
 - think 剥离:思考区里的围栏/@调用是草稿不算数、粘在 </think> 后面的围栏
   剥完落到行首能认出;
 - 两通道混用:按出现位置排序;
+- streaming=True 透传:围栏闭合后还要空行确认(防执行半截命令);
 - 参数表(Parameter 列表)→ OpenAI 的 JSON Schema,给原生通道发请求用。
 
 跑法:uv run pytest tests/unit/tools/test_base.py -v
@@ -52,6 +54,16 @@ def test_md_fence_with_args() -> None:
     assert uses[0].tool.name == "save"
     assert uses[0].args == ["a.txt"]
     assert uses[0].content == "文件内容"
+
+
+def test_md_multiword_args_single_element() -> None:
+    """块头参数整段作为一个元素:```save a b``` 的 args 是 ["a b"]。
+
+    围栏解析在第一个空格处把"语言标记"和"参数"切开,剩下的空格不再切,
+    所以 args 列表要么没有、要么恰好一个元素 —— 执行端按"一段参数文本"理解。
+    """
+    uses = list(ToolUse.iter_from_content("```save a b\n内容\n```"))
+    assert uses[0].args == ["a b"]
 
 
 def test_md_lang_alias_matches_tool() -> None:
@@ -206,6 +218,46 @@ def test_display_command() -> None:
     assert uses[0].display_command() == "shell: command=ls -la"
 
 
+def test_native_colon_without_json_ignored() -> None:
+    """冒号后面没紧跟 { → 不算调用(只是正文里提到了这个格式)。"""
+    assert names("@shell(c1): 这只是普通提及") == []
+    # { 必须和冒号同一行:换行后才开始的大括号不认(解析按"一行一个调用"设计)
+    assert names('@shell(c1):\n{"command": "ls"}') == []
+
+
+def test_native_spaces_before_json_allowed() -> None:
+    """冒号和 { 之间可以隔空格(模型写调用行不一定紧贴着写)。"""
+    uses = list(ToolUse.iter_from_content('@save(call_1):   {"path": "a.txt"}'))
+    assert len(uses) == 1
+    assert uses[0].kwargs == {"path": "a.txt"}
+
+
+def test_native_inside_unclosed_fence_skipped() -> None:
+    """没闭合的围栏一路占到文末,里面的 @ 调用同样当示例跳过。
+
+    (已闭合围栏的情况上面测过;未闭合时围栏区间算到文本末尾,
+    所以之后的整段都算"示例区"。)
+    """
+    assert names('示例:\n```\n@shell(c1): {"command": "ls"}') == []
+
+
+def test_native_dotted_tool_name() -> None:
+    """工具名带点号(MCP 远端工具的 "服务器名.工具名" 前缀)也要认。
+
+    名字里的点只出现在工具名部分,和编号部分的点是两回事;
+    MCP 的端到端调用在 integration/test_mcp.py,这里锁解析这一层。
+    """
+    from my_agent_alpha.tools import add_tools
+
+    spec = ToolSpec(name="t.echo", desc="测试用远端工具", block_types=("t.echo",))
+    add_tools((spec,))
+    uses = list(ToolUse.iter_from_content('@t.echo(c1): {"text": "hi"}'))
+    assert len(uses) == 1
+    assert uses[0].tool.name == "t.echo"
+    assert uses[0].kwargs == {"text": "hi"}
+    assert uses[0].call_id == "c1"
+
+
 # ---- 解析边角(来自旧 test_tools.py)----
 
 
@@ -219,6 +271,20 @@ def test_iter_from_content_maps_fences(workspace: Path) -> None:
 
 
 # ---- 审查 #8:CRLF 归一化 ----
+
+
+def test_streaming_fence_needs_blank_line() -> None:
+    """streaming=True 更严:闭合 ``` 后面还得跟一个空行,调用才算完整。
+
+    规则本体在 codeblock 模块(那边有专项测试);这里锁的是
+    iter_from_content 把这个开关原样透传下去、两种模式各司其职。
+    """
+    complete = "```shell\necho hi\n```\n\n后文"
+    assert len(list(ToolUse.iter_from_content(complete, streaming=True))) == 1
+    no_blank = "```shell\necho hi\n```"
+    assert list(ToolUse.iter_from_content(no_blank, streaming=True)) == []
+    # 默认(非流式)没有空行也认:执行时生成已结束,不需要额外确认
+    assert len(list(ToolUse.iter_from_content(no_blank))) == 1
 
 
 def test_crlf_fence_parsed_clean() -> None:

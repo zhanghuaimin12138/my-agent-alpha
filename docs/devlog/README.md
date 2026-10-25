@@ -44,3 +44,5 @@
 | [031](031-2026-10-24-测试目录镜像化整理.md) | 2026-10-24 | 测试目录镜像化整理:unit 镜像源码树 + integration 独立 | test |
 | [032](032-2026-10-24-strip_think专项测试.md) | 2026-10-24 | strip_think 专项测试:8 个用例锁剥离行为 | test |
 | [033](033-2026-10-24-工具提示词导出脚本.md) | 2026-10-24 | 工具提示词导出脚本:scripts/dump_tool_prompts.py(原生/markdown 两份) | feat |
+| [034](034-2026-10-24-流式原生工具调用全量用例集.md) | 2026-10-24 | 流式原生工具调用全量用例集:286 条(mock→_stream_once→ToolUse) | test |
+| [035](035-2026-10-24-iter_from_content补盲测试.md) | 2026-10-24 | iter_from_content 补盲:6 用例锁未覆盖分支(无 { 行/未闭合围栏/streaming 等) | test |
