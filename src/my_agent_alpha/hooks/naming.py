@@ -24,6 +24,7 @@ import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
+from my_agent_alpha.codeblock import strip_think
 from my_agent_alpha.context import get_current_model
 from my_agent_alpha.hooks import HookType, register_hook
 from my_agent_alpha.llm import reply
@@ -75,8 +76,16 @@ def _make_title_prompt(messages: Sequence[Message]) -> str:
 
 
 def _clean_title(raw: str) -> str:
-    """把模型给的标题收拾干净:取首行、剥引号、限长。"""
-    title = raw.strip().split("\n")[0].strip()
+    """把模型给的标题收拾干净:先剥思考区,再取首行、剥引号、限长。
+
+    为什么先剥思考区:有的模型把推理原文混在回复开头(2026-10-26 实测,
+    标题成了"<think>The user wants a title"),剥掉思考区剩下的才是真标题;
+    思考区没闭合(只写了一半)时 strip_think 返回空串 → 不写标题,下回合再试。
+    """
+    body = strip_think(raw).strip()
+    if not body:
+        return ""
+    title = body.split("\n")[0].strip()
     title = title.strip("\"'“”‘’「」『』《》〈〉 ")
     return title[:_MAX_TITLE_CHARS]
 

@@ -73,6 +73,41 @@ def test_hook_skips_when_no_assistant_yet(logdir: Path, monkeypatch: pytest.Monk
 # ---- 端到端:第一回合结束后真的命名 ----
 
 
+def test_clean_title_strips_think_block() -> None:
+    """模型把思考原文混在回复开头:剥掉思考区,只留真标题。"""
+    assert _clean_title("<think>推理过程…</think>测试日志") == "测试日志"
+    assert _clean_title("<think>推理</think>\n修标题bug") == "修标题bug"
+
+
+def test_clean_title_rejects_unclosed_think() -> None:
+    """思考区没闭合 = 里面全是推理、没有标题:返回空串,钩子下回合再试。"""
+    assert _clean_title("<think>The user wants a title") == ""
+
+
+def test_hook_writes_clean_title_despite_think_prefix(
+    logdir: Path,
+    workspace: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """端到端:命名回复带 <think> 前缀,写进 meta 的仍是干净标题。"""
+    monkeypatch.setenv("ALPHA_AUTO_NAME", "1")
+    set_scripted_replies(
+        [
+            "ok",  # 第一回合的正常回复
+            "<think>用户在测试日志,起个名</think>测试日志",  # 命名回复带思考区
+        ]
+    )
+    chat(
+        ["测试log,返回ok即可"],
+        logdir=logdir,
+        workspace=workspace,
+        model="mock/echo",
+        non_interactive=True,
+    )
+    assert read_session_title(logdir) == "测试日志"
+
+
 def test_names_session_after_first_turn(
     logdir: Path,
     workspace: Path,
