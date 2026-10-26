@@ -85,7 +85,6 @@ def add_tools(specs: tuple[ToolSpec, ...]) -> None:
     _tools_var.set(merged)
 
 
-
 def get_tools() -> tuple[ToolSpec, ...]:
     """返回当前全部工具(必要时先自动初始化)。"""
     init_tools()
