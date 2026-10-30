@@ -17,7 +17,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from my_agent_alpha.logmanager.manager import CONVERSATION_FILENAME
+from my_agent_alpha.context import set_logdir
+from my_agent_alpha.hooks import HookType, dispatch_hooks
+from my_agent_alpha.logmanager.manager import CONVERSATION_FILENAME, LogManager
+from my_agent_alpha.tui import replay
 
 # meta.json 的文件名(标题存在会话目录里,目录名本身不动)
 _META_FILENAME = "meta.json"
@@ -139,3 +142,24 @@ def format_session_row(meta: SessionMeta, index: int | None = None) -> str:
     title = meta.title or "(未命名)"
     lead = f"{index}) " if index is not None else "  "
     return f"{lead}{ts:%m-%d %H:%M}  {title}  ({meta.session_id[:8]} · {meta.n_user}问)"
+
+
+def switch_session(old: LogManager, meta: SessionMeta, model: str) -> LogManager:
+    """执行 /resume 的会话切换:封存旧会话 → 装载新会话 → 更新指针 → 回放。
+
+    五步(见 devlog 032 §4.2):SESSION_END 送走旧的;没人聊过的旧会话
+    直接清理;新会话重开装(消息不可变,重开 = 干净换书签,不改内存历史);
+    set_logdir 让 shell 归档/压缩文件写进新会话目录;SESSION_START 当切换
+    横幅,再回放历史。注意不清输入队列:脚本模式(-n)里排在 /resume 后面
+    的提示词是用户明确要发的,应继续在新会话里处理(032 原稿想清队列,
+    端到端测试证明那会把脚本的后续输入吞掉,已改)。
+    """
+    dispatch_hooks(old, HookType.SESSION_END)
+    if prune_empty_session(old.logdir):
+        print(f"(清理了没人聊过的会话 {old.logdir.name[:8]})")
+    new = LogManager.load(meta.logdir)  # 命令层只放行有用户消息的会话,不会落空
+    set_logdir(meta.logdir)
+    print(f"(已切换:{meta.title or '(未命名)'} · {meta.n_user}问)")
+    dispatch_hooks(new, HookType.SESSION_START, model=model)
+    replay(new)
+    return new

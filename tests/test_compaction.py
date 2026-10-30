@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from my_agent_alpha import Message
-from my_agent_alpha.chat import prepare_messages, step
+from my_agent_alpha.chat import step
 from my_agent_alpha.compaction import (
     compact_messages,
     compress_long_replies,
@@ -17,6 +17,7 @@ from my_agent_alpha.compaction import (
     get_context_budget,
     hard_cap,
     messages_tokens,
+    prepare_messages,
     strip_old_thinking,
     truncate_tool_results,
 )

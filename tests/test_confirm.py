@@ -7,10 +7,11 @@ from pathlib import Path
 import pytest
 
 from my_agent_alpha import LogManager, Message
-from my_agent_alpha.chat import chat, cli_confirm_hook
+from my_agent_alpha.chat import chat
 from my_agent_alpha.confirm import (
     ConfirmationResult,
     clear_confirm_hooks,
+    cli_confirm_hook,
     get_confirmation,
     is_auto_confirm,
     register_confirm_hook,

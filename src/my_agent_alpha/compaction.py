@@ -24,8 +24,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
+from my_agent_alpha.context import get_logdir
+from my_agent_alpha.llm.models import resolve_model
 from my_agent_alpha.message import Message
 
 logger = logging.getLogger(__name__)
@@ -262,3 +265,17 @@ def compact_messages(
     if messages_tokens(result) > budget:
         result = hard_cap(result, budget)
     return result
+
+
+def prepare_messages(
+    messages: Sequence[Message], model: str, budget: int | None = None
+) -> list[Message]:
+    """决定"发给模型哪些消息":超预算时压缩视图,日志本身不动。
+
+    - budget 不传时按模型的上下文窗口自动算(见上方 get_context_budget);
+    - 压缩只改这份返回值(视图),log.messages 原封不动 —— 磁盘日志永不改写;
+    - 详细的压缩规则见本模块上文(剥思考 → 截工具结果 → 压长回复 → 硬截断)。
+    """
+    meta = resolve_model(model)
+    effective = budget if budget is not None else get_context_budget(meta.context)
+    return compact_messages(list(messages), effective, get_logdir())

@@ -24,10 +24,12 @@ import logging
 import os
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
-from my_agent_alpha.config import McpServer
+from my_agent_alpha.config import Config, McpServer
 from my_agent_alpha.message import Message
+from my_agent_alpha.tools import add_tools
 from my_agent_alpha.tools.base import Parameter, ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -413,3 +415,19 @@ ListToolsResult(
 
 
 """
+
+
+def connect_mcp_tools(workspace: Path) -> list[SyncMCPClient]:
+    """按工作区配置连 MCP 服务器:远端工具注册进工具表,返回要保管的客户端。
+
+    什么都没配就返回空列表(绝大多数会话都走这条路径)。
+    客户端必须留着并由调用方在会话结束时 close —— 这里只负责连接和注册。
+    """
+    config = Config.load(workspace)
+    if not config.mcp_servers:
+        return []
+    specs, clients = create_mcp_tools(config.mcp_servers)
+    if specs:
+        add_tools(specs)  # 内置表基础上追加(名字带"服务器."前缀,不会撞)
+        print(f"(MCP:已接入 {len(specs)} 个远端工具)")
+    return clients

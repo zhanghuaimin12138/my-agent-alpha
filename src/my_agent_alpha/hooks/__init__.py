@@ -32,8 +32,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from my_agent_alpha.message import Message
+from my_agent_alpha.tui import print_message
+
+if TYPE_CHECKING:  # 只在类型检查时导入,避免 hooks → logmanager 的运行时依赖
+    from my_agent_alpha.logmanager import LogManager
 
 
 class HookType(StrEnum):
@@ -118,3 +123,14 @@ def trigger_hook(hook_type: HookType, **ctx: object) -> Iterator[Message]:
             import logging
 
             logging.getLogger(__name__).warning("钩子 %s 出错(已跳过): %s", hook.name, e)
+
+
+def dispatch_hooks(manager: LogManager, hook_type: HookType, **ctx: object) -> None:
+    """触发一个生命周期点:钩子产出的消息立刻落盘并显示。
+
+    这是钩子和日志系统的接合点:钩子只管产出消息,落盘/打印都由这里统一做。
+    (manager 会作为上下文的一部分自动传给钩子)
+    """
+    for msg in trigger_hook(hook_type, manager=manager, **ctx):
+        manager.append(msg)
+        print_message(msg)

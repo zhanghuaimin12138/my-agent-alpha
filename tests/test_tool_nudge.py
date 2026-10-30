@@ -17,8 +17,8 @@ from pathlib import Path
 import pytest
 
 from my_agent_alpha import LogManager, Message
-from my_agent_alpha.chat import NUDGE_PREFIX, missed_tooluse_reason
 from my_agent_alpha.llm.mock import set_scripted_replies
+from my_agent_alpha.nudge import NUDGE_PREFIX, missed_tooluse_reason
 from my_agent_alpha.tools import add_tools
 from my_agent_alpha.tools.base import ToolSpec
 

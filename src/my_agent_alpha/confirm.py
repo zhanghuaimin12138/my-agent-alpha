@@ -86,3 +86,70 @@ def get_confirmation(tooluse: ToolUse) -> ConfirmationResult:
         if result is not None:
             return result
     return ConfirmationResult("confirm")
+
+
+# ---- 终端实现:在 CLI 里问用户(从 chat.py 收编,2026-10-30) ----
+
+
+def _preview(tooluse: ToolUse) -> str:
+    """生成给用户看的"这次要执行什么"预览。
+
+    示例:shell 调用 → "shell: command=ls -la";
+    save 调用 → "save a.txt" + 内容前几行。
+    """
+    if tooluse.tool.name in ("save", "append") and tooluse.content is not None:
+        path = (
+            (tooluse.args or ["?"])[0] if tooluse.args else (tooluse.kwargs or {}).get("path", "?")
+        )
+        lines = tooluse.content.split("\n")
+        head = "\n".join(lines[:5])
+        more = "\n…" if len(lines) > 5 else ""
+        return f"{tooluse.tool.name} {path}\n{head}{more}"
+    return tooluse.display_command()
+
+
+def cli_confirm_hook(tooluse: ToolUse) -> ConfirmationResult | None:
+    """优先级 0 的终端询问:打印预览,问用户 y/n/e/a(只在交互模式注册)。
+
+    y 或回车 → 放行;n → 跳过;e → 用户输入改写后的内容再执行;
+    a → 本会话后续都不再问。输入结束(Ctrl-D)按跳过处理(安全方向)。
+    """
+    if is_auto_confirm():
+        return None  # 用户已选"全部放行":本钩子退位,链尾自动放行
+    print(f"\n┌─ 需要确认:{tooluse.tool.name} ─────────────")
+    print(f"│ {_preview(tooluse)}")
+    while True:
+        try:
+            answer = input("└─ 执行?[y]是 / n 跳过 / e 改写 / a 全部放行: ").strip().lower()
+        except EOFError:
+            return ConfirmationResult("skip", message="输入结束,按跳过处理")
+        if answer in ("y", ""):
+            return ConfirmationResult("confirm")
+        if answer == "n":
+            return ConfirmationResult("skip", message="用户选择跳过")
+        if answer == "a":
+            set_auto_confirm(True)
+            return ConfirmationResult("confirm")
+        if answer == "e":
+            edited = input("  改写为: ")
+            if edited.strip():
+                return ConfirmationResult("edit", edited_content=edited)
+
+
+def setup_confirm_chain(interactive: bool, yes: bool) -> None:
+    """会话开始时装配确认链(每次重建,防止上个会话残留)。
+
+    - 安全护栏(200):永远注册 —— 灾难命令连 -y 也不放行;
+    - 只读放行(10):永远注册 —— ls/grep 不用烦用户;
+    - 终端询问(0):只在交互模式且没开 -y 时注册 ——
+      非交互(脚本/测试)和 -y 走到链尾自动放行(自主模式)。
+    """
+    # 延迟导入:shell_safety 反向引用本模块(钩子要返回 ConfirmationResult),
+    # 写在模块顶部会循环导入,挪进函数体就没事
+    from my_agent_alpha.tools.shell_safety import guardrail_hook, readonly_hook
+
+    clear_confirm_hooks()
+    register_confirm_hook("guardrail", guardrail_hook, priority=200)
+    register_confirm_hook("readonly", readonly_hook, priority=10)
+    if interactive and not yes:
+        register_confirm_hook("cli", cli_confirm_hook, priority=0)
