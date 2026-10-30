@@ -45,3 +45,5 @@
 | [032](032-2026-10-26-resume命令方案.md) | 2026-10-26 | /log list 增强 + /resume 命令方案(单会话跳转,纯文档待验收) | docs |
 | [033](033-2026-10-26-修复标题混入think.md) | 2026-10-26 | 修复:会话标题混入模型思考原文(strip_think 复用) | fix |
 | [034](034-2026-10-26-main函数拆分.md) | 2026-10-26 | 重构:main 拆成嵌套函数(build_parser/load_settings/make_logdir) | refactor |
+| [035](035-2026-10-26-resume命令落地.md) | 2026-10-26 | /resume 命令落地 + /log list 增强 + 空会话清理(实施 032) | impl |
+| [036](036-2026-10-29-code-review子代理方案.md) | 2026-10-29 | code review 子代理方案(只读强制 shell + /review,纯文档待落地) | docs |

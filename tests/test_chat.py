@@ -134,9 +134,8 @@ def test_exit_command(logdir: Path, workspace: Path) -> None:
             model="mock/echo",
             non_interactive=True,
         )
-    # /exit 不产生用户消息
-    manager = LogManager.load(logdir)
-    assert not any(m.role == "user" for m in manager.messages)
+    # /exit 不产生用户消息:只输过命令 = 没人聊过,整个会话目录被清理
+    assert not logdir.exists()
 
 
 def test_unknown_slash_treated_as_text(logdir: Path, workspace: Path) -> None:

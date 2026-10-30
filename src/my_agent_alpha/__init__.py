@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> None:
         ~/.local/share/my-agent-alpha/projects/-home-yby-projects-…-d15c78a0/logs/会话名
         """
         from my_agent_alpha.dirs import get_session_root
-        from my_agent_alpha.hooks.naming import write_session_title
+        from my_agent_alpha.logmanager.sessions import write_session_title
 
         session_name = args.name or generate_conversation_id()
         logdir = get_session_root(args.workspace) / session_name

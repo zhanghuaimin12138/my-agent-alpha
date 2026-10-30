@@ -69,7 +69,7 @@ class Message:
     role: Role
     content: str
     timestamp: datetime = field(default_factory=utcnow, compare=False)
-    # 当这条消息是"工具输出"时,记录它对应哪一次工具调用(原生工具调用格式的关键,
+    # 当这条消息是"工具输出"时,记录它对应哪一次工具调用(原生工具调用格式的关键
     # 从第一天就预留:每个 call_id 恰好配一个结果)
     call_id: str | None = field(default=None, compare=False)
     pinned: bool = field(default=False, compare=False)  # 重要消息,将来压缩上下文时永不删

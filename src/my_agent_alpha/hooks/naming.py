@@ -19,49 +19,26 @@
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Iterator, Sequence
-from pathlib import Path
 
 from my_agent_alpha.codeblock import strip_think
 from my_agent_alpha.context import get_current_model
 from my_agent_alpha.hooks import HookType, register_hook
 from my_agent_alpha.llm import reply
 from my_agent_alpha.logmanager import LogManager
+from my_agent_alpha.logmanager.sessions import (
+    read_session_title,
+    write_session_title,
+)
 from my_agent_alpha.message import Message
 
 # 标题最长保留多少字(模型偶尔啰嗦,超了硬截)
 _MAX_TITLE_CHARS = 30
 
-# meta.json 的文件名(标题存在会话目录旁边,目录名本身不动)
-_META_FILENAME = "meta.json"
-
 # 总开关(默认开):测试环境用 ALPHA_AUTO_NAME=0 关掉,防止命名调用
 # 消耗 mock 的脚本回复序列、subagent 子进程多跑一次模型
 _AUTO_NAME_ENV = "ALPHA_AUTO_NAME"
-
-
-def read_session_title(logdir: Path) -> str | None:
-    """读会话标题;没有 meta.json、文件坏了、标题是空的,都返回 None。"""
-    try:
-        data = json.loads((logdir / _META_FILENAME).read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
-    title = data.get("title")
-    return title if isinstance(title, str) and title.strip() else None
-
-
-def write_session_title(logdir: Path, title: str) -> None:
-    """把标题原子写进 meta.json(先写临时文件再改名,中途崩溃不留半个文件)。
-
-    先确保目录存在:main 的 --name 分支在 chat() 创建 logdir 之前就会
-    调到这里(subagent 子进程正是这种场景),目录不在就得自己建。
-    """
-    logdir.mkdir(parents=True, exist_ok=True)
-    tmp = logdir / f"{_META_FILENAME}.tmp"
-    tmp.write_text(json.dumps({"title": title}, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, logdir / _META_FILENAME)
 
 
 def _make_title_prompt(messages: Sequence[Message]) -> str:

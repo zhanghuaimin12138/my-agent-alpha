@@ -101,7 +101,7 @@ def test_builtin_log_list_shows_title_and_mtime(
     logdir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """/log list:按修改时间倒序(新→旧),显示标题 + uuid 前 8 位。"""
-    from my_agent_alpha.hooks.naming import write_session_title
+    from my_agent_alpha.logmanager.sessions import write_session_title
 
     root = logdir.parent
     older = root / "aaaa1111aaaa1111aaaa1111aaaa1111"
@@ -110,12 +110,121 @@ def test_builtin_log_list_shows_title_and_mtime(
     newer.mkdir()
     write_session_title(older, "旧会话")
     write_session_title(newer, "新会话")
+    # 列表只收"有人聊过"的会话:各补一条用户消息
+    LogManager.load(older, create=True).append(Message("user", "hi"))
+    LogManager.load(newer, create=True).append(Message("user", "hi"))
     os.utime(older, (1_000_000_000, 1_000_000_000))  # 2001 年
     os.utime(newer, (2_000_000_000, 2_000_000_000))  # 2033 年
     assert execute_cmd("/log list", _manager(logdir), "mock/echo") is True
     out = capsys.readouterr().out
     assert out.index("新会话") < out.index("旧会话")  # 新的排前面
     assert "bbbb2222" in out  # uuid 前 8 位
+
+
+def test_log_list_filters_subagent_and_empty_sessions(
+    logdir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """/log list 过滤:子代理会话和没人聊过的会话不出现。"""
+    root = logdir.parent
+    sub = root / "subagent-aaaa1111aaaa1111aaaa1111aa"
+    sub.mkdir()
+    LogManager.load(sub, create=True).append(Message("user", "子代理的活"))
+    empty = root / "cccc3333cccc3333cccc3333cccc3333"
+    empty.mkdir()
+    real = root / "bbbb2222bbbb2222bbbb2222bbbb2222"
+    real.mkdir()
+    LogManager.load(real, create=True).append(Message("user", "真会话"))
+
+    assert execute_cmd("/log list", _manager(logdir), "mock/echo") is True
+    out = capsys.readouterr().out
+    assert "bbbb2222" in out
+    assert "subagent" not in out and "aaaa1111" not in out
+    assert "cccc3333" not in out
+
+
+def test_resume_prefix_paths(logdir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """/resume <码> 的判定树:找不到 / 子代理拒绝 / 撞码 / 精确命中抛切换请求。"""
+    from my_agent_alpha.commands import ResumeRequested
+
+    root = logdir.parent
+    real1 = root / "aaaa1111aaaa1111aaaa1111aaaa1111"
+    real2 = root / "aaaa2222aaaa2222aaaa2222aaaa2222"
+    sub = root / "subagent-aaaa3333aaaa3333aaaa3333aa"
+    for d in (real1, real2, sub):
+        d.mkdir()
+        LogManager.load(d, create=True).append(Message("user", "hi"))
+    m = _manager(logdir)
+
+    assert execute_cmd("/resume zzzz", m, "mock/echo") is True
+    assert "没找到以 zzzz 开头" in capsys.readouterr().out
+
+    assert execute_cmd("/resume subagent", m, "mock/echo") is True
+    assert "子代理" in capsys.readouterr().out
+
+    assert execute_cmd("/resume aaaa", m, "mock/echo") is True
+    assert "多个会话以此开头" in capsys.readouterr().out
+
+    with pytest.raises(ResumeRequested) as ei:
+        execute_cmd("/resume aaaa1", m, "mock/echo")
+    assert ei.value.meta.logdir == real1
+
+    # 指向当前会话:提示后安静返回,不抛切换请求
+    assert execute_cmd(f"/resume {logdir.name[:8]}", m, "mock/echo") is True
+    assert "这就是当前会话" in capsys.readouterr().out
+
+
+def test_resume_picker_selects_by_number(
+    logdir: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/resume 不带码:编号列表 + 输序号选择(回车/无效序号取消)。"""
+    from my_agent_alpha.commands import ResumeRequested
+
+    root = logdir.parent
+    real = root / "aaaa1111aaaa1111aaaa1111aaaa1111"
+    real.mkdir()
+    LogManager.load(real, create=True).append(Message("user", "hi"))
+    m = _manager(logdir)
+
+    monkeypatch.setattr("builtins.input", lambda _: "1")
+    with pytest.raises(ResumeRequested) as ei:
+        execute_cmd("/resume", m, "mock/echo")
+    assert ei.value.meta.logdir == real
+    assert "1)" in capsys.readouterr().out
+
+    monkeypatch.setattr("builtins.input", lambda _: "99")
+    assert execute_cmd("/resume", m, "mock/echo") is True  # 无效序号:不抛,取消
+    assert "无效序号" in capsys.readouterr().out
+
+
+def test_resume_end_to_end_switch(
+    logdir: Path, workspace: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """集成:会话 A 聊一轮 → 会话 B 里 /resume 回 A → 后续消息写进 A,B 被清理。"""
+    set_scripted_replies(["回复A"])
+    chat(["问题A"], logdir=logdir, workspace=workspace, model="mock/echo", non_interactive=True)
+    assert "问题A" in [m.content for m in LogManager.load(logdir)]
+
+    set_scripted_replies(["回复B"])
+    logdir_b = logdir.parent / "bbbb2222bbbb2222bbbb2222bbbb2222"
+    chat(
+        [f"/resume {logdir.name[:8]}", "问题2"],
+        logdir=logdir_b,
+        workspace=workspace,
+        model="mock/echo",
+        non_interactive=True,
+    )
+
+    contents = [m.content for m in LogManager.load(logdir)]
+    assert "问题2" in contents and "回复B" in contents  # 新消息写进了旧会话 A
+    assert not logdir_b.exists()  # B 没人聊过,切换时被清理
+    out = capsys.readouterr().out
+    assert "已切换" in out and "问题A" in out  # 切换横幅 + 历史回放
+
+
+def test_empty_session_pruned_on_exit(logdir: Path, workspace: Path) -> None:
+    """开了就退出(没有任何用户消息)的会话,退出时整个目录清掉。"""
+    chat([], logdir=logdir, workspace=workspace, model="mock/echo", non_interactive=True)
+    assert not logdir.exists()
 
 
 def test_builtin_hooks(logdir: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -138,8 +247,8 @@ def test_e2e_exit_command_via_chat(logdir: Path, workspace: Path) -> None:
             model="mock/echo",
             non_interactive=True,
         )
-    manager = LogManager.load(logdir)
-    assert not any(m.role == "user" for m in manager.messages)  # 命令不进日志
+    # 只输过命令 = 没人聊过:整个会话目录被清理(命令不进日志,日志里也没别的)
+    assert not logdir.exists()
 
 
 def test_e2e_unknown_command_treated_as_text(logdir: Path, workspace: Path) -> None:

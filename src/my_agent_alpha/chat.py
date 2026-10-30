@@ -1,4 +1,4 @@
-"""核心循环:三层嵌套(仿 gptme chat.py 的结构)。
+"""核心循环:三层嵌套。
 
 整个 agent 对话就是三层循环套在一起:
 
@@ -33,8 +33,8 @@ from pathlib import Path
 from typing import Any
 
 from my_agent_alpha.codeblock import fenced_regions, iter_from_markdown, strip_think
+from my_agent_alpha.commands import ResumeRequested, execute_cmd
 from my_agent_alpha.commands import builtin as builtin_commands
-from my_agent_alpha.commands import execute_cmd
 from my_agent_alpha.compaction import compact_messages, get_context_budget
 from my_agent_alpha.config import Config
 from my_agent_alpha.confirm import (
@@ -44,11 +44,12 @@ from my_agent_alpha.confirm import (
     register_confirm_hook,
     set_auto_confirm,
 )
-from my_agent_alpha.context import agent_context, get_logdir, set_current_model
+from my_agent_alpha.context import agent_context, get_logdir, set_current_model, set_logdir
 from my_agent_alpha.hooks import HookType, trigger_hook
 from my_agent_alpha.hooks import builtin as builtin_hooks
 from my_agent_alpha.llm import ContextLengthError, reply, resolve_model
 from my_agent_alpha.logmanager import LogManager
+from my_agent_alpha.logmanager.sessions import SessionMeta, prune_empty_session
 from my_agent_alpha.message import (
     DECLINED_CONTENT,
     INTERRUPT_CONTENT,
@@ -534,6 +535,16 @@ def _print_message(msg: Message) -> None:
         print(f"\n│ {msg.content}")
 
 
+def _replay(manager: LogManager) -> None:
+    """把会话历史打印到终端(恢复旧会话 / /resume 切换时用)。
+
+    复用 _print_message 的显示规则,现场聊天时看到什么样,回放就什么样
+    (系统提示词这类 hide/quiet 消息照旧不显示)。
+    """
+    for msg in manager.messages:
+        _print_message(msg)
+
+
 def _run_chat_loop(
     manager: LogManager,
     prompt_queue: list[str],
@@ -541,25 +552,34 @@ def _run_chat_loop(
     *,
     non_interactive: bool,
     tool_format: str = "markdown",
-) -> None:
+) -> LogManager:
     """外层主循环:不断取下一条输入(命令行参数或终端输入),交给中层处理。
 
     non_interactive=True 时:命令行带来的提示词处理完就返回(脚本模式);
     否则一直等到用户在终端按 Ctrl-D 才结束。
+
+    返回"最终"的会话管理器:/resume 可能中途切换过会话,收尾的钩子和
+    清理要对准最后那个,不能对准开场那个。
     """
     while True:
         if prompt_queue:
             content = prompt_queue.pop(0)
         elif non_interactive:
-            return
+            return manager
         else:
             msg = _get_user_input()
             if msg is None:
-                return
+                return manager
             content = msg.content
 
-        if content.startswith("/") and execute_cmd(content, manager, model):
-            continue
+        if content.startswith("/"):
+            try:
+                if execute_cmd(content, manager, model, non_interactive=non_interactive):
+                    continue
+            except ResumeRequested as r:
+                # /resume:命令层只负责找到目标,切换在这里执行(见 _switch_session)
+                manager = _switch_session(manager, r.meta, model)
+                continue
 
         # append/钩子也纳入 try:任何一条消息的存储问题都不该打死 REPL
         # (日志层已对坏字符兜底,这里是最后一道网)
@@ -589,6 +609,27 @@ def _run_chat_loop(
                 manager.append(msg)
 
 
+def _switch_session(old: LogManager, meta: SessionMeta, model: str) -> LogManager:
+    """执行 /resume 的会话切换:封存旧会话 → 装载新会话 → 更新指针 → 回放。
+
+    五步(见 devlog 032 §4.2):SESSION_END 送走旧的;没人聊过的旧会话
+    直接清理;新会话重开装(消息不可变,重开 = 干净换书签,不改内存历史);
+    set_logdir 让 shell 归档/压缩文件写进新会话目录;SESSION_START 当切换
+    横幅,再回放历史。注意不清输入队列:脚本模式(-n)里排在 /resume 后面
+    的提示词是用户明确要发的,应继续在新会话里处理(032 原稿想清队列,
+    端到端测试证明那会把脚本的后续输入吞掉,已改)。
+    """
+    _dispatch_hooks(old, HookType.SESSION_END)
+    if prune_empty_session(old.logdir):
+        print(f"(清理了没人聊过的会话 {old.logdir.name[:8]})")
+    new = LogManager.load(meta.logdir)  # 命令层只放行有用户消息的会话,不会落空
+    set_logdir(meta.logdir)
+    print(f"(已切换:{meta.title or '(未命名)'} · {meta.n_user}问)")
+    _dispatch_hooks(new, HookType.SESSION_START, model=model)
+    _replay(new)
+    return new
+
+
 def chat(
     prompts: Sequence[str],
     logdir: Path,
@@ -610,7 +651,7 @@ def chat(
 
     返回 LogManager,测试用它检查日志内容;正常调用可以忽略返回值。
     """
-    # MCP:配置了外部服务器就连上,远端工具转成本地 ToolSpec(gptme 同款)
+    # MCP:配置了外部服务器就连上,远端工具转成本地 ToolSpec
     mcp_clients: list[Any] = []
     config = Config.load(workspace)
     if config.mcp_servers:
@@ -645,15 +686,15 @@ def chat(
             manager.append(Message("system", mem_index, pinned=True, hide=True))
     else:
         # 恢复会话:回放已打印的历史
-        for msg in manager.messages:
-            _print_message(msg)
+        _replay(manager)
 
     try:
         with agent_context(workspace, logdir):
             set_current_model(model)  # subagent 工具会继承这个模型
             _dispatch_hooks(manager, HookType.SESSION_START, model=model)
             try:
-                _run_chat_loop(
+                # 接住循环返回的"最终"会话:/resume 可能中途换过,收尾对准它
+                manager = _run_chat_loop(
                     manager,
                     list(prompts),
                     model,
@@ -665,4 +706,7 @@ def chat(
     finally:
         for client in mcp_clients:
             client.close()  # 收掉 MCP 子进程
+        # 没人聊过的会话不留壳(起了名就退出的、刚开就 /resume 跳走的)
+        if prune_empty_session(manager.logdir):
+            print(f"(清理了没人聊过的会话 {manager.logdir.name[:8]})")
     return manager

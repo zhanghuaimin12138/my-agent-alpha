@@ -1,4 +1,4 @@
-"""内置命令:/help /exit /tools /log /model /hooks。
+"""内置命令:/help /exit /tools /log /model /hooks /resume。
 
 全部用 @command 装饰器注册 —— 和将来插件写的命令走同一套机制。
 
@@ -9,12 +9,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 
-from my_agent_alpha.commands import CommandContext, command
+from my_agent_alpha.commands import CommandContext, ResumeRequested, command
 from my_agent_alpha.context import get_workspace
 from my_agent_alpha.hooks import get_hooks
+from my_agent_alpha.logmanager.sessions import (
+    SessionMeta,
+    find_by_prefix,
+    format_session_row,
+    is_subagent,
+    list_sessions,
+    read_session_title,
+)
 from my_agent_alpha.memory_store import list_memories
 from my_agent_alpha.tools import get_tools
 
@@ -27,8 +34,9 @@ def help_cmd(ctx: CommandContext) -> None:
     """/help(别名 /?):列出全部命令。"""
     print("命令:")
     print("  /help /?     本帮助          /exit /quit /q  退出")
-    print("  /tools       列出可用工具     /log            会话信息")
-    print("  /model       当前模型        /hooks          已注册钩子")
+    print("  /tools       列出可用工具     /log list       会话列表")
+    print("  /resume      恢复旧会话      /model          当前模型")
+    print("  /hooks       已注册钩子      /memory         查看记忆")
     print("其余 / 开头的输入按普通对话处理。")
 
 
@@ -50,30 +58,78 @@ def tools_cmd(ctx: CommandContext) -> None:
 @command("log")
 def log_cmd(ctx: CommandContext) -> None:
     """/log:当前会话信息;/log list 列出全部会话(时间 + 标题,新→旧)。"""
-    from my_agent_alpha.hooks.naming import read_session_title
-
     if ctx.args and ctx.args[0] == "list":
-        logs_root = ctx.manager.logdir.parent
-        # 目录名是 uuid(机器看的),排序靠修改时间,认会话靠标题
-        sessions = sorted(
-            (d for d in logs_root.iterdir() if d.is_dir()),
-            key=lambda d: d.stat().st_mtime,
-            reverse=True,
-        )
+        # 只列"能续聊"的会话:子代理的工作记录、没人聊过的会话都过滤掉
+        sessions = [
+            m
+            for m in list_sessions(ctx.manager.logdir.parent)
+            if not is_subagent(m) and m.n_user > 0
+        ]
         if not sessions:
             print("  (还没有任何会话)")
             return
-        for d in sessions:
-            ts = datetime.fromtimestamp(d.stat().st_mtime)
-            # 注意不能用 title 当变量名:下面的分支会给同名变量赋 None,mypy 会抗议
-            shown = read_session_title(d) or "(未命名)"
-            print(f"  {ts:%m-%d %H:%M}  {shown}  ({d.name[:8]})")
+        for m in sessions:
+            print(format_session_row(m))
+        print("  (恢复用 /resume <码>)")
         return
     title = read_session_title(ctx.manager.logdir)  # 可能还没命名(None)
     print(f"  会话目录:{ctx.manager.logdir}")
     if title:
         print(f"  会话标题:{title}")
     print(f"  消息条数:{len(ctx.manager)}")
+
+
+@command("resume")
+def resume_cmd(ctx: CommandContext) -> None:
+    """/resume <码>:恢复旧会话接着聊;不带码显示编号列表,输入序号选择。"""
+    meta = _pick_resume_target(ctx)
+    if meta is None:
+        return  # 没选成(找不到/撞码/取消),提示语已在 _pick 里打印
+    if meta.logdir == ctx.manager.logdir:
+        print("  这就是当前会话")
+        return
+    print(f"  (当前会话已封存,回到它可用 /resume {meta.session_id[:8]})")
+    raise ResumeRequested(meta)
+
+
+def _pick_resume_target(ctx: CommandContext) -> SessionMeta | None:
+    """解析 /resume 的参数,选出目标会话;选不成返回 None(原因已打印)。
+
+    两条路:带码 = 按会话 id 前缀找(git 短哈希同款,撞码要多输几位);
+    不带码 = 编号列表 + 输入序号(回车取消)。子代理会话一律拒绝。
+    """
+    root = ctx.manager.logdir.parent
+    if not ctx.args:
+        # 无参:列表只收"可续聊"的(排除子代理、没人聊过的、当前会话)
+        candidates = [
+            m
+            for m in list_sessions(root)
+            if not is_subagent(m) and m.n_user > 0 and m.logdir != ctx.manager.logdir
+        ]
+        if not candidates:
+            print("  (没有可恢复的会话)")
+            return None
+        for i, m in enumerate(candidates, 1):
+            print(format_session_row(m, i))
+        choice = input("输入序号恢复(回车取消): ").strip()
+        if not choice.isdigit() or not 1 <= int(choice) <= len(candidates):
+            print("  (无效序号,已取消)")
+            return None
+        return candidates[int(choice) - 1]
+    matches = find_by_prefix(root, ctx.args[0])
+    if matches and all(is_subagent(m) for m in matches):
+        print("  这是子代理的工作记录,不能恢复续聊")
+        return None
+    matches = [m for m in matches if not is_subagent(m)]
+    if not matches:
+        print(f"  没找到以 {ctx.args[0]} 开头的会话,用 /log list 查看")
+        return None
+    if len(matches) > 1:
+        print("  多个会话以此开头,请多输几位:")
+        for m in matches:
+            print(format_session_row(m))
+        return None
+    return matches[0]
 
 
 @command("model")

@@ -14,10 +14,12 @@ from my_agent_alpha.context import set_current_model
 from my_agent_alpha.hooks.naming import (
     _clean_title,
     naming_hook,
+)
+from my_agent_alpha.llm.mock import set_scripted_replies
+from my_agent_alpha.logmanager.sessions import (
     read_session_title,
     write_session_title,
 )
-from my_agent_alpha.llm.mock import set_scripted_replies
 
 # ---- 单元:标题清洗与 meta 读写 ----
 
@@ -163,6 +165,9 @@ def test_log_list_shows_all_sessions(logdir: Path, capsys: pytest.CaptureFixture
     other.mkdir()
 
     manager = LogManager.load(logdir, create=True)
+    # 列表只收"有人聊过"的会话:两边都补一条用户消息
+    manager.append(Message("user", "hi"))
+    LogManager.load(other, create=True).append(Message("user", "hi"))
     log_cmd(CommandContext(args=["list"], full="list", manager=manager, model="mock/echo"))
 
     out = capsys.readouterr().out
