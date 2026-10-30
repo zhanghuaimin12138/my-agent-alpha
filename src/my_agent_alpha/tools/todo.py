@@ -1,12 +1,10 @@
-"""todo 工具:内存任务清单 + 完成门控(第二轮 R2)。
+"""todo 工具:模型自己维护的内存任务清单(增删改查)。
 
 治什么:多步任务做到一半,模型一句"我完成了"就溜 —— 没有任何机制
-逼它把说过要做的事做完。本模块两部分配合:
-
-1. 任务清单工具:模型自己维护的待办事项(增删改查),存在进程内存里;
-2. 完成门控(loop.continue 钩子):回合结束而没有工具调用、清单上
-   还有未完成项时,自动注入一条 user 消息把模型拉回来继续干;
-   连续 MAX_GATE_WARNINGS 轮仍不动手就熔断(产出报告,不再催)。
+逼它把说过要做的事做完。这个工具让模型把待办一条条记下来;
+"没做完不许收尾"的拦截(完成门控)和"恢复会话时重建清单"(重放)
+是两个钩子,实现在 hooks/todo.py —— 清单状态存放在本模块,
+钩子只是读写它,两边分工见那边模块开头的说明。
 
 状态不写单独的文件:todo 的每次调用都是普通消息,已经记在
 conversation.jsonl 里;恢复会话时 session.start 钩子把日志里的
@@ -32,21 +30,12 @@ todo 调用重放一遍,状态就精确重建了(对照 gptme 的重放设计)�
 
 from __future__ import annotations
 
-import contextlib
-import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal
 
-from my_agent_alpha.hooks import HookType, register_hook
-from my_agent_alpha.logmanager import LogManager
-from my_agent_alpha.message import (
-    DECLINED_CONTENT,
-    INTERRUPT_CONTENT,
-    LLM_REQUEST_FAILED_PREFIX,
-    Message,
-)
-from my_agent_alpha.tools.base import Parameter, ToolSpec, ToolUse
+from my_agent_alpha.message import Message
+from my_agent_alpha.tools.base import Parameter, ToolSpec
 
 # 状态只有三种(gptme 还有 paused,但研究报告里它的语义连原文都讲不清,砍掉)
 TodoState = Literal["pending", "in_progress", "completed"]
@@ -57,15 +46,6 @@ _STATE_LABELS: dict[str, str] = {
     "in_progress": "进行中",
     "completed": "已完成",
 }
-
-# 门控消息的统一前缀(终端识别 + 测试定位,对齐 NUDGE_PREFIX 的做法)
-GATE_PREFIX = "[todo 门控]"
-
-# 连续多少轮"提醒后仍无工具调用"就熔断(环境变量可调,便于测试)
-MAX_GATE_WARNINGS = int(os.environ.get("ALPHA_MAX_TODO_GATES", "2"))
-
-# 用量统计消息的前缀:判断回合怎么收尾时要跳过它(它只是随附的统计)
-_USAGE_PREFIX = "[用量]"
 
 # 子命令一览(报错时原样展示给模型,让它自己纠正)
 _USAGE = (
@@ -85,22 +65,30 @@ class TodoItem:
 
 # ---- 模块级状态(进程内存,对照 gptme 的 _current_todos)----
 # _todos: 编号 → 条目;_next_id: 下一个要发的编号(clear 后回到 1,
-# 这是"重放日志能精确重建状态"的前提);_gate_warnings: 门控已连续催了几轮
+# 这是"重放日志能精确重建状态"的前提)
 _todos: dict[int, TodoItem] = {}
 _next_id: int = 1
-_gate_warnings: int = 0
 
 
-def _reset_todos() -> None:
-    """清空清单和门控计数(conftest 测试隔离、重放前归零都用它)。"""
-    global _next_id, _gate_warnings
+def reset_todos() -> None:
+    """清空清单、编号归 1(conftest 测试隔离、重放钩子开工前归零都用它)。"""
+    global _next_id
     _todos.clear()
     _next_id = 1
-    _gate_warnings = 0
+
+
+def format_item(item: TodoItem) -> str:
+    """把一条待办渲染成一行 "#1 [进行中] 文本"(read 输出与门控消息共用)。"""
+    return f"#{item.id} [{_STATE_LABELS[item.state]}] {item.text}"
+
+
+def incomplete_items() -> list[TodoItem]:
+    """未完成的待办,按编号排好序(完成门控逐条列出它们时用)。"""
+    return sorted((t for t in _todos.values() if t.state != "completed"), key=lambda t: t.id)
 
 
 def render_todos() -> str:
-    """把清单渲染成紧凑的行式文本(read 的输出,也是门控消息的正文)。
+    """把清单渲染成紧凑的行式文本(read 的输出)。
 
     示例:
         todo 清单(未完成 2/3):
@@ -113,13 +101,13 @@ def render_todos() -> str:
     incomplete = sum(1 for t in _todos.values() if t.state != "completed")
     lines = [f"todo 清单(未完成 {incomplete}/{len(_todos)}):"]
     for item in sorted(_todos.values(), key=lambda t: t.id):
-        lines.append(f"#{item.id} [{_STATE_LABELS[item.state]}] {item.text}")
+        lines.append(format_item(item))
     return "\n".join(lines)
 
 
 def has_incomplete_todos() -> bool:
     """清单上是否还有未完成项(完成门控的判定条件)。"""
-    return any(t.state != "completed" for t in _todos.values())
+    return bool(incomplete_items())
 
 
 def _apply_add(text: str) -> str:
@@ -138,7 +126,7 @@ def _parse_updates(tokens: list[str]) -> dict[str, str] | str:
 
     宽容处理:text 的值可以带空格 —— 后面跟着的不含 = 的词
     续接到上一个 text 的值上(如 "update 1 text=修复 登录页")。
-    解析：
+    解析:
     1.state=pending|in_progress|completed"
     2.text=<新描述>
     """
@@ -213,9 +201,10 @@ def _apply_clear() -> str:
     return f"已清空 {count} 项,编号从 #1 重新开始。"
 
 
-def _parse_and_apply(command: str) -> str:
+def parse_and_apply(command: str) -> str:
     """解析一行子命令并应用到清单;返回回执或错误说明(不抛异常)。
 
+    公开给重放钩子用(hooks/todo.py 按日志里的调用逐条重演)。
     示例:"add 修 bug" → 新增一条;"update 1 state=completed" → 标记完成。
     """
     command = command.strip()
@@ -235,8 +224,8 @@ def _parse_and_apply(command: str) -> str:
     return f"错误: 未知子命令 {sub}。\n文法:{_USAGE}"
 
 
-def _command_text(code: str | None, args: list[str] | None, kwargs: dict[str, str] | None) -> str:
-    """从两种通道的参数里取出子命令文本。
+def command_text(code: str | None, args: list[str] | None, kwargs: dict[str, str] | None) -> str:
+    """从两种通道的参数里取出子命令文本(重放钩子解析日志调用时也用它)。
 
     原生通道:kwargs["command"];markdown 通道:围栏体 code;
     模型偶尔把命令写在围栏头上(```todo add xxx)→ 退回用 args 拼接。
@@ -250,8 +239,8 @@ def execute_todo(
     code: str | None, args: list[str] | None, kwargs: dict[str, str] | None
 ) -> Iterator[Message]:
     """todo 工具的执行入口:取子命令 → 应用 → 包成 system 消息返回。"""
-    command = _command_text(code, args, kwargs)
-    yield Message("system", _parse_and_apply(command))
+    command = command_text(code, args, kwargs)
+    yield Message("system", parse_and_apply(command))
 
 
 tool = ToolSpec(
@@ -283,111 +272,3 @@ tool = ToolSpec(
     read_only=True,  # 只动进程内存,不碰文件系统 → 免确认链
     execute=execute_todo,
 )
-
-
-# ---------------- 完成门控(loop.continue 钩子)----------------
-
-
-def _turn_ran_tools(messages: Sequence[Message]) -> bool:
-    """从日志尾部往回看:本回合(最近一条 user 之后)有没有真执行过工具调用。
-
-    遇到带可运行调用的 assistant 就算"干过活"(收尾那轮没有调用不影响);
-    遇到 user 就是回合边界,不用再往前看。
-    """
-    for msg in reversed(messages):
-        if msg.role == "user":
-            return False
-        if msg.role == "assistant" and any(
-            tu.is_runnable for tu in ToolUse.iter_from_content(msg.content)
-        ):
-            return True
-    return False
-
-
-def _tail_is_terminal_marker(messages: Sequence[Message]) -> bool:
-    """日志尾部是不是"用户已表态/请求失败"式的收尾标记。
-
-    中断、用户拒绝执行、LLM 请求失败都属于"不该再催"的结束方式;
-    [用量] 之类的随附 system 消息先跳过,找到回合最后一条实质消息再判断。
-    """
-    for msg in reversed(messages):
-        if msg.role == "system" and msg.content.startswith(_USAGE_PREFIX):
-            continue
-        return msg.role == "system" and msg.content.startswith(
-            (INTERRUPT_CONTENT, DECLINED_CONTENT, LLM_REQUEST_FAILED_PREFIX)
-        )
-    return False
-
-
-def _gate_message() -> str:
-    """拼门控注入的 user 消息:未完成清单 + 怎么解除门控。"""
-    lines = [f"{GATE_PREFIX} 你的待办清单还有未完成事项,请继续执行,不要现在结束:"]
-    for item in sorted(_todos.values(), key=lambda t: t.id):
-        if item.state != "completed":
-            lines.append(f"#{item.id} [{_STATE_LABELS[item.state]}] {item.text}")
-    lines.append(
-        "继续工作直到全部完成;每完成一项就用 todo update <id> state=completed 标记;"
-        "某项确实无法完成或不再需要时,用 todo remove <id> 移除并说明原因。"
-        "(若用户刚刚给出了新指示,优先响应指示;之后再回到这份待办。)"
-    )
-    return "\n".join(lines)
-
-
-def todo_gate_hook(manager: LogManager, **_ctx: object) -> Iterator[Message]:
-    """loop.continue 门控:想收尾但清单未清 → 注入 user 消息拉回来。
-
-    产出 user 消息会被外层循环回灌成下一轮输入(见 _run_chat_loop);
-    连续 MAX_GATE_WARNINGS 轮提醒仍无工具调用 → 产出 system 熔断报告
-    (不回灌,循环自然结束)。
-    """
-    global _gate_warnings
-    msgs = manager.messages
-    if _turn_ran_tools(msgs):
-        _gate_warnings = 0  # 这回合真干过活:催促额度重新计(对齐 NUDGE 的重置哲学)
-    if not has_incomplete_todos():
-        _gate_warnings = 0  # 清单干净:计数归零,下个任务从头计
-        return
-    if _tail_is_terminal_marker(msgs):
-        return  # 中断/拒绝/失败收的尾:用户已表态,不催
-    if _gate_warnings >= MAX_GATE_WARNINGS:
-        _gate_warnings = 0  # 熔断后额度归零:用户下次输入是新的意图,给重新计数的机会
-        yield Message(
-            "system",
-            f"{GATE_PREFIX} 已连续 {MAX_GATE_WARNINGS} 轮提醒仍未推进待办"
-            "(期间没有任何工具调用),停止催促,本会话回到正常节奏。",
-        )
-        return
-    _gate_warnings += 1
-    yield Message("user", _gate_message())
-
-
-# ---------------- 会话恢复(session.start 重放钩子)----------------
-
-
-def replay_todo_hook(manager: LogManager, **_ctx: object) -> Iterator[Message]:
-    """session.start 重放:扫日志里的 todo 调用,重建清单状态。
-
-    只重演会改状态的操作(add/update/remove/clear,read 跳过);
-    坏命令静默跳过 —— 状态停在最后一个有效操作上(对照 gptme 的 _replay)。
-    先 _reset_todos 再重放:同进程第二次 chat() 时不会叠加出重复条目。
-    """
-    _reset_todos()
-    for msg in manager.messages:
-        if msg.role != "assistant":
-            continue
-        for tu in ToolUse.iter_from_content(msg.content):
-            if tu.tool.name != "todo":
-                continue
-            command = _command_text(tu.content, tu.args, tu.kwargs)
-            if command.split()[:1] == ["read"]:
-                continue  # 只读查询不改状态,跳过
-            # 重放遇到意外(坏命令等):保持当前状态,继续扫后面的
-            with contextlib.suppress(Exception):
-                _parse_and_apply(command)
-    return iter(())  # 重放只重建内存状态,不往日志里产消息
-
-
-def register_todo_hooks() -> None:
-    """注册 todo 的两个钩子(hooks/builtin.py 启动时调用)。"""
-    register_hook("todo.gate", HookType.LOOP_CONTINUE, todo_gate_hook, priority=0)
-    register_hook("todo.replay", HookType.SESSION_START, replay_todo_hook, priority=10)

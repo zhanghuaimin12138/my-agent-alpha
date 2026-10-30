@@ -14,8 +14,9 @@ import pytest
 
 from my_agent_alpha import LogManager, Message
 from my_agent_alpha.chat import chat
+from my_agent_alpha.hooks import todo
 from my_agent_alpha.llm.mock import set_scripted_replies
-from my_agent_alpha.tools import todo
+from my_agent_alpha.tools import todo as todo_tool
 
 # 模型收尾话术(不触发 NUDGE 的"正常最终回答")
 _DONE = "任务完成,无需工具。"
@@ -138,7 +139,7 @@ def test_replay_rebuilds_state_from_log(logdir: Path, workspace: Path) -> None:
 
     chat([], logdir=logdir, workspace=workspace, model="mock/echo", non_interactive=True)
 
-    (result,) = list(todo.execute_todo("read", None, None))
+    (result,) = list(todo_tool.execute_todo("read", None, None))
     assert "#1 [进行中] 任务A" in result.content
     assert "未完成 1/1" in result.content
 
@@ -151,5 +152,5 @@ def test_replay_idempotent_across_sessions(logdir: Path, workspace: Path) -> Non
     for _ in range(2):
         chat([], logdir=logdir, workspace=workspace, model="mock/echo", non_interactive=True)
 
-    (result,) = list(todo.execute_todo("read", None, None))
+    (result,) = list(todo_tool.execute_todo("read", None, None))
     assert result.content.count("#") == 1  # 仍然只有一项
