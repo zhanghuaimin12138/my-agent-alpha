@@ -42,6 +42,7 @@ def register_builtin_hooks() -> None:
     """注册全部内置钩子(幂等:同名重注册自动替换)。"""
     register_hook("builtin.usage", HookType.GENERATION_POST, usage_hook, priority=0)
     register_hook("builtin.session_info", HookType.SESSION_START, session_info_hook, priority=0)
+
     # 会话自动命名(turn.post);todo 工具的门控与重放
     from my_agent_alpha.hooks.naming import register_naming_hook
     from my_agent_alpha.hooks.todo import register_todo_hooks

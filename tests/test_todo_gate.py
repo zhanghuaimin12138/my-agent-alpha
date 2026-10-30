@@ -1,9 +1,9 @@
 """todo 完成门控的端到端测试:拦截注入、额度重置、熔断、恢复重放。
 
-剧本全部用 set_scripted_replies 导演(照 test_tool_nudge.py 的套路):
+剧本全部用 set_scripted_replies 导演(mock 模型按脚本逐条回复):
 模型先建清单、再"光说不做",看门控是否把它拉回来;以及重放钩子
 能否从日志重建清单状态。收尾话术统一用"任务完成,无需工具。"
-—— 已验证不会触发 NUDGE(空回复提醒),保证测的只是 todo 门控。
+—— 是普通的最终回答(不带工具调用),保证测的只是 todo 门控。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from my_agent_alpha.hooks import todo
 from my_agent_alpha.llm.mock import set_scripted_replies
 from my_agent_alpha.tools import todo as todo_tool
 
-# 模型收尾话术(不触发 NUDGE 的"正常最终回答")
+# 模型收尾话术(普通最终回答,不带工具调用)
 _DONE = "任务完成,无需工具。"
 
 
@@ -65,7 +65,7 @@ def test_gate_nudges_then_model_finishes(logdir: Path, workspace: Path) -> None:
 def test_gate_budget_resets_after_execution(
     logdir: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """执行过工具调用后催促额度归零(对齐 NUDGE 的额度重置哲学)。
+    """执行过工具调用后催促额度归零(干过活就重新数)。
 
     上限调到 1:空谈→注入→执行→空谈→再注入(第二次注入就是重置生效的
     证明,没有重置的话这里已经熔断了)→ 空谈 → 熔断。

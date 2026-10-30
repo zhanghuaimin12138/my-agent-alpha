@@ -120,7 +120,7 @@ def test_names_session_after_first_turn(
     monkeypatch.setenv("ALPHA_AUTO_NAME", "1")
     set_scripted_replies(
         [
-            # 第一回合的正常回复(措辞避开 NUDGE 的"行动宣告"标记,不加"我来帮你")
+            # 第一回合的正常回复
             "print 没输出是因为缓冲没刷新,加 flush=True 即可。",
             "调试打印问题",  # 命名请求的回复(钩子消耗脚本的下一条)
         ]

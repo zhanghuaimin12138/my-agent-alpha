@@ -35,7 +35,7 @@ from my_agent_alpha.tools.todo import (
     reset_todos,
 )
 
-# 门控消息的统一前缀(终端识别 + 测试定位,对齐 NUDGE_PREFIX 的做法)
+# 门控消息的统一前缀(终端识别 + 测试定位)
 GATE_PREFIX = "[todo 门控]"
 
 # 连续多少轮"提醒后仍无工具调用"就熔断(环境变量可调,便于测试)
@@ -108,7 +108,7 @@ def todo_gate_hook(manager: LogManager, **_ctx: object) -> Iterator[Message]:
     global _gate_warnings
     msgs = manager.messages
     if _turn_ran_tools(msgs):
-        _gate_warnings = 0  # 这回合真干过活:催促额度重新计(对齐 NUDGE 的重置哲学)
+        _gate_warnings = 0  # 这回合真干过活:催促额度重新计,从这轮重新数
     if not has_incomplete_todos():
         _gate_warnings = 0  # 清单干净:计数归零,下个任务从头计
         return
