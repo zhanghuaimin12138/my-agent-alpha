@@ -36,7 +36,8 @@ def help_cmd(ctx: CommandContext) -> None:
     print("  /help /?     本帮助          /exit /quit /q  退出")
     print("  /tools       列出可用工具     /log list       会话列表")
     print("  /resume      恢复旧会话      /model          当前模型")
-    print("  /hooks       已注册钩子      /memory         查看记忆")
+    print("  /compact     压缩历史为视图   /hooks          已注册钩子")
+    print("  /memory      查看记忆")
     print("其余 / 开头的输入按普通对话处理。")
 
 
@@ -146,6 +147,29 @@ def model_cmd(ctx: CommandContext) -> None:
         print(f"  当前模型:{ctx.model}(切换请用 -m {ctx.args[0]} 重启会话)")
     else:
         print(f"  当前模型:{ctx.model}")
+
+
+@command("compact")
+def compact_cmd(ctx: CommandContext) -> None:
+    """/compact:把当前会话历史压缩成视图(手动触发一次,完整日志不动)。
+
+    没有足够可压缩的内容时什么都不做;压缩结果过不了安检(比如还有
+    没返回的工具调用)也保持现状,打一句原因。
+    """
+    from my_agent_alpha.compaction import compact_current_to_view
+
+    try:
+        view_id = compact_current_to_view(ctx.manager, ctx.model)
+    except ValueError as e:
+        print(f"  (压缩结果不安全,已保持现状:{e})")
+        return
+    if view_id is None:
+        print("  (没有足够可压缩的内容,保持现状)")
+        return
+    print(
+        f"  (已压缩为视图 {view_id}:{len(ctx.manager)} 条,"
+        f"完整历史仍为 {len(ctx.manager.master_messages)} 条)"
+    )
 
 
 @command("hooks")

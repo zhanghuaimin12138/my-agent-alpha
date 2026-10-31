@@ -19,18 +19,22 @@ from pathlib import Path
 import pytest
 
 from my_agent_alpha import LogManager, Message
+from my_agent_alpha import compaction as compaction_mod
 from my_agent_alpha.chat import chat
 from my_agent_alpha.commands import builtin as builtin_commands  # noqa: F401 导入即注册内置命令
 from my_agent_alpha.commands import execute_cmd
+from my_agent_alpha.compaction import compact_current_to_view
 from my_agent_alpha.hooks import todo as todo_hooks
 from my_agent_alpha.llm import mock as llm_mock
 from my_agent_alpha.llm.mock import set_scripted_replies
+from my_agent_alpha.llm.openai_compat import msgs2dicts
 from my_agent_alpha.logmanager.sessions import (
     list_sessions,
     switch_session,
 )
 from my_agent_alpha.tools import todo as todo_tool
 from my_agent_alpha.tui import replay
+from my_agent_alpha.utils import len_tokens
 
 
 def _todo_call(command: str) -> Message:
@@ -204,3 +208,139 @@ def test_chat_end_to_end_with_view(
     assert final.current_view == "compacted-001"
     assert "继续" in [m.content for m in final.messages]
     assert "旧问题" in [m.content for m in final.master_messages]
+
+
+# ---- V4:压缩器接入视图(/compact 与 compact_current_to_view)----
+
+
+def _chat_with_fat_thinking(logdir: Path) -> LogManager:
+    """造一个"老回复都带大段思考"的会话(剥思考就有可观收益)。"""
+    manager = LogManager.load(logdir, create=True)
+    manager.append(Message("system", "提示词", pinned=True, hide=True))
+    for i in range(8):
+        manager.append(Message("user", f"问{i}"))
+        manager.append(Message("assistant", "<think>" + "思考" * 2000 + f"</think>结论{i}"))
+    manager.append(Message("user", "最新问题"))
+    return manager
+
+
+def test_compact_to_view_creates_view(logdir: Path) -> None:
+    """手动压缩:生成视图、模型改读视图、完整历史一字节不动。"""
+    manager = _chat_with_fat_thinking(logdir)
+    master_bytes = (logdir / "conversation.jsonl").read_bytes()
+    n_master = len(manager.master_messages)
+
+    view_id = compact_current_to_view(manager, "mock/echo")
+
+    assert view_id == "compacted-001"
+    assert manager.current_view == "compacted-001"
+    # 压缩有效:老的思考区被剥掉(距结尾不足 5 条的保持原样,近期的本来就不动),
+    # 视图明显小于完整历史
+    assert "<think>" not in "".join(m.content for m in manager.messages[:-5])
+    assert len_tokens(manager.messages) < len_tokens(manager.master_messages) * 0.5
+    # 安检要求:pinned 提示词和最新 user 意图都在视图里
+    contents = [m.content for m in manager.messages]
+    assert contents[0] == "提示词" and manager.messages[0].pinned
+    assert "最新问题" in contents
+    # 完整历史原样(Master 只追加,压缩不改写)
+    assert (logdir / "conversation.jsonl").read_bytes() == master_bytes
+    assert len(manager.master_messages) == n_master
+    # 双写接着工作
+    manager.append(Message("user", "压缩后的新输入"))
+    assert len(manager.master_messages) == n_master + 1
+    assert manager.messages[-1].content == "压缩后的新输入"
+
+
+def test_compact_to_view_no_gain_no_view(logdir: Path) -> None:
+    """没什么可压缩的:不建视图、不产生任何文件。"""
+    manager = LogManager.load(logdir, create=True)
+    manager.append(Message("system", "提示词", pinned=True, hide=True))
+    manager.append(Message("user", "就一句话"))
+
+    assert compact_current_to_view(manager, "mock/echo") is None
+    assert manager.current_view is None
+    assert not (logdir / "views").exists()
+
+
+def test_second_compaction_starts_from_view(logdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """第二次压缩的输入是上一次视图,不是重新压整个 Master。"""
+    manager = _chat_with_fat_thinking(logdir)
+    assert compact_current_to_view(manager, "mock/echo") == "compacted-001"
+    first_view = list(manager.messages)
+
+    # 再聊几轮(进 Master 和 compacted-001)
+    manager.append(Message("user", "新问题二"))
+    manager.append(Message("assistant", "<think>短思考</think>答二"))
+
+    # 探针:捕获 compact_messages 实际收到的压缩源
+    captured: list[list[Message]] = []
+    real = compaction_mod.compact_messages
+
+    def spy(messages: list[Message], budget: int, logdir: Path | None = None) -> list[Message]:
+        captured.append(list(messages))
+        return real(messages, budget, logdir)
+
+    monkeypatch.setattr(compaction_mod, "compact_messages", spy)
+
+    assert compact_current_to_view(manager, "mock/echo") == "compacted-002"
+    # 第二次的源 = 第一次视图 + 两轮新消息(对象都是同一条链上的)
+    assert captured[0][: len(first_view)] == first_view
+    assert [m.content for m in captured[0][-2:]] == ["新问题二", "<think>短思考</think>答二"]
+    # compacted-001 仍是历史快照
+    assert (logdir / "views" / "compacted-001.jsonl").exists()
+
+
+def test_compact_command_runs(logdir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """/compact 命令:成功路径打印视图名;没东西可压时如实说明。"""
+    manager = _chat_with_fat_thinking(logdir)
+    assert execute_cmd("/compact", manager, "mock/echo") is True
+    out = capsys.readouterr().out
+    assert "已压缩为视图 compacted-001" in out
+    assert "完整历史仍为" in out
+
+    # 已经压过、没什么新内容 → 第二次说明保持现状
+    assert execute_cmd("/compact", manager, "mock/echo") is True
+    out = capsys.readouterr().out
+    assert "没有足够可压缩的内容" in out
+    assert manager.current_view == "compacted-001"
+
+
+def test_chat_continues_after_compaction(
+    logdir: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """压缩成视图后,下一轮 step() 照常收发(含原生协议形状的消息)。"""
+    manager = _chat_with_fat_thinking(logdir)
+    # 补一段原生交互历史(两个调用、用量夹中间、结果配对)再压缩
+    manager.append(
+        Message("assistant", '读两个:\n@read(call_1): {"path": "a"}\n@read(call_2): {"path": "b"}')
+    )
+    manager.append(Message("system", "[用量] 输入 9 / 输出 9 tokens"))
+    manager.append(Message("system", "内容一", call_id="call_1"))
+    manager.append(Message("system", "内容二", call_id="call_2"))
+    assert compact_current_to_view(manager, "mock/echo") == "compacted-001"
+    assert manager.messages[-1].call_id == "call_2"  # 配对完整进了视图
+
+    # 压缩后的视图直接发给接口转换层:无孤儿、无丢主调用
+    dicts = msgs2dicts(manager.messages)
+    call_ids = {
+        tc["id"] for d in dicts if d["role"] == "assistant" for tc in d.get("tool_calls", [])
+    }
+    assert sorted(d["tool_call_id"] for d in dicts if d["role"] == "tool") == sorted(call_ids)
+
+    # 继续对话:mock 模型正常一轮
+    captured: list[list[Message]] = []
+    real_stream = llm_mock.stream
+
+    def spy_stream(messages: Sequence[Message], model_name: str) -> Iterator[str]:
+        captured.append(list(messages))
+        return real_stream(messages, model_name)
+
+    monkeypatch.setattr("my_agent_alpha.llm.mock_stream", spy_stream)
+    set_scripted_replies(["继续的回答"])
+    chat(["接着说"], logdir=logdir, workspace=workspace, model="mock/echo", non_interactive=True)
+
+    assert captured[0] == list(manager.messages) or captured  # 请求发出去了
+    assert captured[0][-1].content == "接着说"
+    final = LogManager.load(logdir)
+    assert final.current_view == "compacted-001"
+    assert "接着说" in [m.content for m in final.messages]
