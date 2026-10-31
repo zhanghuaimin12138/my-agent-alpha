@@ -36,7 +36,7 @@ from pathlib import Path
 
 from my_agent_alpha.commands import ResumeRequested, execute_cmd
 from my_agent_alpha.commands import builtin as builtin_commands
-from my_agent_alpha.compaction import get_context_budget, prepare_messages
+from my_agent_alpha.compaction import prepare_messages
 from my_agent_alpha.confirm import setup_confirm_chain
 from my_agent_alpha.context import agent_context, set_current_model
 from my_agent_alpha.hooks import HookType, dispatch_hooks, trigger_hook
@@ -54,6 +54,7 @@ from my_agent_alpha.prompts import session_opening_messages
 from my_agent_alpha.tools import execute_msg, get_tools
 from my_agent_alpha.tools.base import has_runnable_tooluse
 from my_agent_alpha.tui import StreamPrinter, print_message, read_user_input, replay
+from my_agent_alpha.utils import get_context_budget
 
 logger = logging.getLogger(__name__)
 
@@ -213,16 +214,21 @@ def _process_message_conversation(
 
     模型的回复文字在流式过程中已经打印过了,这里不再重复打印。
 
-    停止条件就一条:最后一条模型回复里没有任何可执行的工具调用
-    → 回合结束,回到提示符等用户输入(架构纪律:继续判定只翻日志,
-    不引入任何额外状态;模型漏写调用就当作它给了最终回答,不再提醒)。
+    停止条件就一条:最后一条模型回复里没有任何可执行的工具调用。
     """
     steps = 0
     while True:
         dispatch_hooks(manager, HookType.STEP_PRE, model=model)
+
+        # 初始化渲染器
         printer = StreamPrinter()
+
+        # 中断标记
         interrupted = False
+        # 工具取消标记
         declined = False
+
+        # 取step产出的消息（llm/tool/GENERATION_POST hook）
         for msg in step(manager.messages, model, on_token=printer.token, tool_format=tool_format):
             # 产出消息先落盘
             manager.append(msg)
@@ -237,6 +243,7 @@ def _process_message_conversation(
                 interrupted = True
             if msg.role == "system" and msg.content.startswith(DECLINED_CONTENT):
                 declined = True
+
         steps += 1
         if interrupted:
             manager.append(Message("system", INTERRUPT_CONTENT, quiet=True))
@@ -290,6 +297,7 @@ def step(
         msgs = prepare_messages(log_messages, model, budget=emergency)
         msg_response = reply(msgs, model, on_token=on_token, tools=tools, tool_format=tool_format)
     yield msg_response
-    # 生成完毕钩子:产出的消息跟在模型回复后面进日志(如 [用量] 记录)
+    # GENERATION_POST hook 输出msg:产出的消息跟在模型回复后面进日志(如 [用量] 记录)
     yield from trigger_hook(HookType.GENERATION_POST, message=msg_response)
+    # 产出工具调用消息（list[msg]得到后一个一个msg yield出去）
     yield from execute_msg(msg_response)
