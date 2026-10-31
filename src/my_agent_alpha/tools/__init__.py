@@ -129,6 +129,10 @@ def get_tool_for_langtag(lang: str) -> ToolSpec | None:
 def execute_msg(msg: Message) -> list[Message]:
     """把一条模型回复里要的所有工具调用都执行一遍,返回结果消息列表。
 
+    这边必须返回消息列表,因为:
+    1.要处理中断
+    2.一个工具执行有多个msg的情况,直接yield出去会导致不知道哪条msg是该工具的最后一条
+
     示例:模型回复里有两个调用(shell、read),返回列表就是
     [shell 的结果, read 的结果],顺序和调用顺序一致。
 
@@ -142,11 +146,14 @@ def execute_msg(msg: Message) -> list[Message]:
     """
     results: list[Message] = []
     tooluses = list(ToolUse.iter_from_content(msg.content))  # 从一条assitant消息解析出list[tooluse]
+
     for i, tooluse in enumerate(tooluses):  # 遍历list[tooluse]
         if not tooluse.is_runnable:
             continue
         try:
-            executed = list(tooluse.execute())  # 得到一个tooluse的执行结果msg/list[msg]
+            # 得到一个tooluse的全部执行结果，因为可能yield多条消息，
+            # 这边要用list收集起来，以便在最后一条msg上盖上call_id的编号
+            executed = list(tooluse.execute())
         except KeyboardInterrupt:
             results.append(
                 Message("system", f"{INTERRUPT_CONTENT} 工具 {tooluse.tool.name} 被中断,未执行")
@@ -162,4 +169,5 @@ def execute_msg(msg: Message) -> list[Message]:
             # 把 call_id 盖在最后一条结果上(消息不可变,用 replace 造新的)
             executed[-1] = replace(executed[-1], call_id=tooluse.call_id)
         results.extend(executed)
+
     return results
