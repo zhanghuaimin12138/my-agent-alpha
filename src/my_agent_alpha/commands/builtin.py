@@ -37,7 +37,8 @@ def help_cmd(ctx: CommandContext) -> None:
     print("  /tools       列出可用工具     /log list       会话列表")
     print("  /resume      恢复旧会话      /model          当前模型")
     print("  /compact     机械压缩历史    /compact summarize  模型笔记压缩")
-    print("  /hooks       已注册钩子      /memory         查看记忆")
+    print("  /context     历史与压缩状态   /hooks          已注册钩子")
+    print("  /memory      查看记忆")
     print("其余 / 开头的输入按普通对话处理。")
 
 
@@ -147,6 +148,39 @@ def model_cmd(ctx: CommandContext) -> None:
         print(f"  当前模型:{ctx.model}(切换请用 -m {ctx.args[0]} 重启会话)")
     else:
         print(f"  当前模型:{ctx.model}")
+
+
+@command("context")
+def context_cmd(ctx: CommandContext) -> None:
+    """/context:看当前读的是哪份历史、压缩状态、预算占用(只读)。"""
+    from my_agent_alpha.compaction_llm import find_checkpoint
+    from my_agent_alpha.llm.models import resolve_model
+    from my_agent_alpha.utils import get_context_budget, len_tokens
+
+    m = ctx.manager
+    master_tokens = len_tokens(m.master_messages)
+    print(f"  完整历史:{len(m.master_messages)} 条 / 约 {master_tokens} tokens")
+    if m.current_view is None:
+        print("  当前读:完整历史(没有激活视图)")
+    else:
+        view_tokens = len_tokens(m.messages)
+        print(
+            f"  当前读:视图 {m.current_view}"
+            f"({len(m.messages)} 条 / 约 {view_tokens} tokens,模型读这份)"
+        )
+        ckpt = find_checkpoint(m.messages)
+        if ckpt is not None:
+            meta = (ckpt.metadata or {}).get("compaction", {})
+            before = meta.get("tokens_before", "?")
+            via = "LLM 笔记" if meta.get("kind") == "llm_checkpoint" else "规则压缩"
+            summary_model = meta.get("summary_model") or "—"
+            print(
+                f"  压缩方式:{via}(前约 {before} → 现约 {view_tokens} tokens,"
+                f"摘要模型 {summary_model})"
+            )
+    budget = get_context_budget(resolve_model(ctx.model).context)
+    used = len_tokens(m.messages)
+    print(f"  预算占用:{used} / {budget}(约 {used * 100 // max(budget, 1)}%)")
 
 
 @command("compact")

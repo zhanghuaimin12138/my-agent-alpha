@@ -88,9 +88,10 @@ def test_hook_second_trigger_increments(logdir: Path) -> None:
     manager = _fat_history(logdir)
     autocompact_hook(manager)
     assert manager.current_view == "compacted-001"
-    # 视图还小,先补一段超阈值的新对话(直接追加,内容不重要)
+    # 视图还小,补一段超阈值的带思考区对话(软压缩有收益,仍走机械路径)
     for i in range(25):
-        manager.append(Message("user", f"补充问{i}" + "字" * 4000))
+        manager.append(Message("user", f"补充问{i}"))
+        manager.append(Message("assistant", "<think>" + "思" * 4200 + f"</think>答{i}"))
     assert len_tokens(manager.messages) > 115_200 * ac._AUTO_COMPACT_RATIO
 
     autocompact_hook(manager)
@@ -138,8 +139,9 @@ def test_hook_skips_unfinished_tool_calls(logdir: Path, capsys: pytest.CaptureFi
     manager = LogManager.load(logdir, create=True)
     manager.append(Message("system", "提示词", pinned=True, hide=True))
     manager.append(Message("user", "多聊点" + "字" * 4000))
-    for i in range(25):
-        manager.append(Message("user", f"继续聊{i}" + "字" * 4000))  # 拉超阈值
+    for i in range(25):  # 带思考区的轮次拉超阈值,让决策走机械压缩路径
+        manager.append(Message("user", f"继续聊{i}"))
+        manager.append(Message("assistant", "<think>" + "思" * 4200 + f"</think>答{i}"))
     # 中断现场放在最后:assistant 发起原生调用,但结果还没回来
     manager.append(Message("assistant", '读文件:\n@read(call_1): {"path": "a"}'))
 
@@ -218,3 +220,164 @@ def test_chat_continues_normally_after_auto_compact(
     contents = [m.content for m in restored.master_messages]
     assert "跑个命令" in contents  # 完整历史都在
     assert any("hi" in c for c in contents)  # 工具真的执行了
+
+
+# ---- 步骤 4:三选一决策与"请模型"通道 ----
+
+# 一份合格的最简笔记(七节齐全,给 mock 模型当回复用)
+_GOOD_NOTE = "\n".join(
+    [
+        "## Objective\n继续任务。",
+        "## Key Decisions\n无。",
+        "## Current State\nDone: 前期工作。",
+        "## Open Items\n1. 继续",
+        "## Critical Facts\n无。",
+        "## Context Files\n- 无",
+        "## Next Action\n继续。",
+    ]
+)
+
+
+def _dense_history(logdir: Path) -> LogManager:
+    """造"干货型"超阈值历史:纯用户长消息,软压缩没东西可删。"""
+    manager = LogManager.load(logdir, create=True)
+    manager.append(Message("system", "提示词", pinned=True, hide=True))
+    for i in range(30):
+        manager.append(Message("user", f"问题{i}" + "细节" * 2000))  # 每条约 4000
+    manager.append(Message("user", "最新问题"))
+    return manager
+
+
+def test_decide_compaction_three_ways() -> None:
+    """三选一:不超→none;有思考区可剥→trim;纯干货→summarize。"""
+    budget = 115_200
+    target = int(budget * 0.6)
+
+    tiny = [Message("user", "就一句")]
+    assert ac.decide_compaction(tiny, budget, target) == "none"
+
+    # 带思考区的老回复(距结尾 ≥5 才会被剥)+ 5 条垫底消息
+    with_think = [
+        Message("assistant", "<think>" + "思" * 100_000 + "</think>结论"),
+        *[Message("user", f"垫{i}") for i in range(5)],
+    ]
+    assert ac.decide_compaction(with_think, budget, target) == "trim"
+
+    dense = [Message("user", "字" * 100_000)]  # 一条超大干货:软压缩省不动
+    assert ac.decide_compaction(dense, budget, target) == "summarize"
+
+
+def test_hook_summarize_disabled_by_default(
+    logdir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """干货历史 + 自动请模型默认关:安静跳过,不花钱不建视图。"""
+    manager = _dense_history(logdir)
+    reset_autocompact()
+    autocompact_hook(manager)
+    assert manager.current_view is None
+    assert not (logdir / "views").exists()
+    assert capsys.readouterr().out == ""
+
+
+def test_hook_summarize_when_enabled(
+    logdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """开关打开 + 模型交回合格笔记:自动生成视图并提示。"""
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    monkeypatch.setenv("ALPHA_AUTO_LLM_COMPACT", "1")
+    reset_autocompact()
+    manager = _dense_history(logdir)
+    set_scripted_replies([_GOOD_NOTE])
+
+    autocompact_hook(manager)
+
+    assert manager.current_view == "compacted-001"
+    out = capsys.readouterr().out
+    assert "自动压缩(模型笔记)" in out
+
+
+def test_hook_llm_throttle_same_digest(
+    logdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """同一段历史自动压失败过:不再重复调模型(手动命令不受此限)。"""
+    from my_agent_alpha import compaction_llm as clm
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    monkeypatch.setenv("ALPHA_AUTO_LLM_COMPACT", "1")
+    reset_autocompact()
+    manager = _dense_history(logdir)
+    set_scripted_replies(["## Objective\n只写一节"])  # 坏笔记 → ValueError
+
+    calls: list[object] = []
+    real = clm.compact_current_with_llm
+
+    def spy(m: object, **kw: object) -> object:
+        calls.append(kw)
+        return real(m, **kw)  # type: ignore[arg-type,return-value]
+
+    monkeypatch.setattr(ac, "compact_current_with_llm", spy)
+
+    autocompact_hook(manager)  # 第一次:真调了模型,笔记不合格
+    assert len(calls) == 1
+    assert "不再重试" in capsys.readouterr().out
+
+    autocompact_hook(manager)  # 第二次:同一段历史 → 不再花钱
+    autocompact_hook(manager)
+    assert len(calls) == 1
+    assert manager.current_view is None
+
+
+def test_hook_llm_throttle_retry_after_change(
+    logdir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """节流只在"同一段历史"内生效:来了新消息(指纹变)就允许再试。"""
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    monkeypatch.setenv("ALPHA_AUTO_LLM_COMPACT", "1")
+    reset_autocompact()
+    manager = _dense_history(logdir)
+    set_scripted_replies(["## Objective\n只写一节"])  # 先失败
+    autocompact_hook(manager)
+    assert "不再重试" in capsys.readouterr().out
+    assert manager.current_view is None
+
+    # 历史有实质变化(新消息)→ 指纹不同 → 允许再试,这次笔记合格
+    manager.append(Message("user", "新进展" + "细节" * 2000))
+    set_scripted_replies([_GOOD_NOTE])
+    autocompact_hook(manager)
+    assert manager.current_view == "compacted-001"
+
+
+def test_context_command(logdir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """/context:无视图时报完整历史;有视图时报视图与压缩方式。"""
+    from my_agent_alpha.commands import builtin as builtin_commands  # noqa: F401
+    from my_agent_alpha.commands import execute_cmd
+
+    manager = LogManager.load(logdir, create=True)
+    manager.append(Message("user", "你好"))
+    assert execute_cmd("/context", manager, "mock/echo") is True
+    out = capsys.readouterr().out
+    assert "完整历史:1 条" in out
+    assert "没有激活视图" in out
+
+    # 手动做一次 LLM 压缩(mock 笔记),再看 /context
+    from my_agent_alpha.compaction_llm import compact_current_with_llm
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    for i in range(12):  # 补长历史让前缀非空(尾部预算 8000 tokens)
+        manager.append(Message("user", f"问题{i}" + "细节" * 1000))
+    set_scripted_replies([_GOOD_NOTE])
+    assert compact_current_with_llm(manager, model="mock/echo").status == "success"
+
+    assert execute_cmd("/context", manager, "mock/echo") is True
+    out = capsys.readouterr().out
+    assert "compacted-001" in out
+    assert "LLM 笔记" in out
+    assert "预算占用" in out

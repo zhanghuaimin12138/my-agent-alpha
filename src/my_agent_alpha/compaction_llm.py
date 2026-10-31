@@ -490,7 +490,7 @@ def compact_current_with_llm(
             reason=(f"摘要模型窗口太小({window} tokens),扣掉笔记输出与指令预留后装不下任何历史"),
             tokens_before=tokens_before,
         )
-    extra_meta: dict[str, object] = {}
+    extra_meta: dict[str, object] = {"tokens_before": tokens_before}
     try:
         # 单条超长消息先裁剪(头尾保留);裁的是给记录员看的副本,原文不动
         bounded = bound_summary_input(prefix, min(_PER_MESSAGE_CAP, evidence_budget // 4))
@@ -521,11 +521,13 @@ def compact_current_with_llm(
             for c in chunks:
                 covered.append([start, start + len(c)])
                 start += len(c)
-            extra_meta = {
-                "chunked": True,
-                "chunk_count": len(chunks),
-                "covered_ranges": covered,
-            }
+            extra_meta.update(
+                {
+                    "chunked": True,
+                    "chunk_count": len(chunks),
+                    "covered_ranges": covered,
+                }
+            )
     except Exception as e:  # 模型层故障:网络/超时/超窗等,如实上报
         return LLMSummaryResult(
             status="failed",
