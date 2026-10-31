@@ -14,10 +14,12 @@ from my_agent_alpha.context import set_current_model
 from my_agent_alpha.hooks.naming import (
     _clean_title,
     naming_hook,
+)
+from my_agent_alpha.llm.mock import set_scripted_replies
+from my_agent_alpha.logmanager.sessions import (
     read_session_title,
     write_session_title,
 )
-from my_agent_alpha.llm.mock import set_scripted_replies
 
 # ---- 单元:标题清洗与 meta 读写 ----
 
@@ -73,6 +75,41 @@ def test_hook_skips_when_no_assistant_yet(logdir: Path, monkeypatch: pytest.Monk
 # ---- 端到端:第一回合结束后真的命名 ----
 
 
+def test_clean_title_strips_think_block() -> None:
+    """模型把思考原文混在回复开头:剥掉思考区,只留真标题。"""
+    assert _clean_title("<think>推理过程…</think>测试日志") == "测试日志"
+    assert _clean_title("<think>推理</think>\n修标题bug") == "修标题bug"
+
+
+def test_clean_title_rejects_unclosed_think() -> None:
+    """思考区没闭合 = 里面全是推理、没有标题:返回空串,钩子下回合再试。"""
+    assert _clean_title("<think>The user wants a title") == ""
+
+
+def test_hook_writes_clean_title_despite_think_prefix(
+    logdir: Path,
+    workspace: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """端到端:命名回复带 <think> 前缀,写进 meta 的仍是干净标题。"""
+    monkeypatch.setenv("ALPHA_AUTO_NAME", "1")
+    set_scripted_replies(
+        [
+            "ok",  # 第一回合的正常回复
+            "<think>用户在测试日志,起个名</think>测试日志",  # 命名回复带思考区
+        ]
+    )
+    chat(
+        ["测试log,返回ok即可"],
+        logdir=logdir,
+        workspace=workspace,
+        model="mock/echo",
+        non_interactive=True,
+    )
+    assert read_session_title(logdir) == "测试日志"
+
+
 def test_names_session_after_first_turn(
     logdir: Path,
     workspace: Path,
@@ -83,7 +120,7 @@ def test_names_session_after_first_turn(
     monkeypatch.setenv("ALPHA_AUTO_NAME", "1")
     set_scripted_replies(
         [
-            # 第一回合的正常回复(措辞避开 NUDGE 的"行动宣告"标记,不加"我来帮你")
+            # 第一回合的正常回复
             "print 没输出是因为缓冲没刷新,加 flush=True 即可。",
             "调试打印问题",  # 命名请求的回复(钩子消耗脚本的下一条)
         ]
@@ -128,8 +165,12 @@ def test_log_list_shows_all_sessions(logdir: Path, capsys: pytest.CaptureFixture
     other.mkdir()
 
     manager = LogManager.load(logdir, create=True)
+    # 列表只收"有人聊过"的会话:两边都补一条用户消息
+    manager.append(Message("user", "hi"))
+    LogManager.load(other, create=True).append(Message("user", "hi"))
     log_cmd(CommandContext(args=["list"], full="list", manager=manager, model="mock/echo"))
 
     out = capsys.readouterr().out
-    assert logdir.name in out and "当前会话" in out
-    assert "2026-1006-abcdef" in out and "(未命名)" in out
+    # 列表只显示 uuid 前 8 位,认会话靠标题
+    assert logdir.name[:8] in out and "当前会话" in out
+    assert "2026-100" in out and "(未命名)" in out

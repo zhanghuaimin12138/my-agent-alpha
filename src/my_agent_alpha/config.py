@@ -3,8 +3,8 @@
 三处配置(优先级从低到高):
 
 1. 用户配置:~/.config/my_agent_alpha/config.toml(全局默认);
-2. 项目配置:工作区(workspace)里的 alpha.toml(每个项目自己的偏好);
-3. 环境变量:ALPHA_MODEL / ALPHA_TOOL_FORMAT ……(临时覆盖,最高)。
+2. 项目配置:工作区(workspace)/alpha.toml (每个项目自己的偏好);
+3. 环境变量:ALPHA_MODEL / ALPHA_TOOL_FORMAT(临时覆盖,最高)。
 
 示例文件内容(alpha.toml 或 config.toml):
 

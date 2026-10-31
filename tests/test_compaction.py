@@ -8,34 +8,20 @@ from pathlib import Path
 import pytest
 
 from my_agent_alpha import Message
-from my_agent_alpha.chat import prepare_messages, step
+from my_agent_alpha.chat import step
 from my_agent_alpha.compaction import (
     compact_messages,
     compress_long_replies,
     compress_reply,
-    estimate_tokens,
-    get_context_budget,
     hard_cap,
-    messages_tokens,
+    prepare_messages,
     strip_old_thinking,
     truncate_tool_results,
 )
 from my_agent_alpha.llm import ContextLengthError
+from my_agent_alpha.utils import len_tokens
 
-# ---- token 估算与预算 ----
-
-
-def test_estimate_ascii_and_cjk() -> None:
-    assert estimate_tokens("abcdefgh") == 2  # 8 个英文字符 ≈ 2 token
-    assert estimate_tokens("中文中文") >= 2  # 中文更"贵",同字符数 token 更多
-    assert estimate_tokens("") == 0
-
-
-def test_budget_math() -> None:
-    assert get_context_budget(100_000) == 90_000  # 9 成窗口
-    small = get_context_budget(5_000)  # 5000-8192-1000 < 0 → 保底链
-    assert small == max(min(4500, 5000 - 8192 - 1000), 1000)  # = 1000
-    assert get_context_budget(20_000) == 20_000 - 8192 - 1000  # 减法分支
+# token 估算与预算的测试在 tests/test_tokens.py(函数已搬到 utils 包)
 
 
 # ---- 阶段 1:剥思考 ----
@@ -144,7 +130,7 @@ def test_hard_cap_keeps_pinned_and_tail() -> None:
     assert out[0].pinned  # 提示词永远在
     assert len(out) < len(msgs)  # 确实丢了旧的
     assert out[-1].content.startswith("消息19")  # 最新的在
-    assert messages_tokens(out) <= 60 + 30  # 约束在预算量级内(允许最后一条略超)
+    assert len_tokens(out) <= 60 + 30  # 约束在预算量级内(允许最后一条略超)
 
 
 # ---- 总入口 ----
@@ -157,7 +143,7 @@ def test_compact_under_budget_only_strips_think() -> None:
         *[Message("user", f"尾{i}") for i in range(5)],
     ]
     out = compact_messages(msgs, budget=10_000)
-    assert messages_tokens(out) <= 10_000
+    assert len_tokens(out) <= 10_000
     assert all("老思考" not in m.content for m in out[:-6])  # 老的被剥(logdir None 也一样)
 
 
@@ -167,7 +153,7 @@ def test_compact_over_budget_fits(workspace: Path, logdir: Path) -> None:
         msgs.append(Message("user", f"问{i}"))
         msgs.append(Message("system", "C" * 5000))  # 一堆大工具结果
     out = compact_messages(msgs, budget=3000, logdir=logdir)
-    assert messages_tokens(out) <= 3000 + 1500  # 收敛到预算量级
+    assert len_tokens(out) <= 3000 + 1500  # 收敛到预算量级
     assert out[0].pinned  # 提示词没丢
 
 
@@ -175,7 +161,7 @@ def test_prepare_messages_integration() -> None:
     msgs = [Message("system", "提示词", pinned=True, hide=True)]
     msgs += [Message("user", f"问{i}") for i in range(30)]
     view = prepare_messages(msgs, "mock/echo", budget=80)
-    assert messages_tokens(view) <= 80 + 30  # 视图被压到预算量级
+    assert len_tokens(view) <= 80 + 30  # 视图被压到预算量级
     # 再次确认:原列表没被动
     assert len(msgs) == 31
 
@@ -206,7 +192,7 @@ def test_step_overflow_retry_with_smaller_context(
     ]
     out = list(step(log, "mock/echo", budget=2000))
     assert len(calls) == 2  # 失败一次、重试一次
-    assert messages_tokens(list(calls[1])) <= messages_tokens(list(calls[0]))  # 重试的更小
+    assert len_tokens(list(calls[1])) <= len_tokens(list(calls[0]))  # 重试的更小
     assert out[0].role == "assistant"
 
 

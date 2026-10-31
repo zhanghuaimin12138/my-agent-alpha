@@ -370,3 +370,16 @@ def tooluses_in_messages(messages: Sequence[Message]) -> list[ToolUse]:
         if msg.role == "assistant":
             return parse_tooluses(msg.content)
     return []
+
+
+def has_runnable_tooluse(messages: Sequence[Message]) -> bool:
+    """回答"模型刚才的回复里,还有没执行完的工具调用吗?" —— 决定循环是否继续。
+
+    找最后一条模型回复,解析其中的工具调用,看有没有可执行的
+    (实现直接复用 tooluses_in_messages,它做的就是"取最后一条回复并解析")。
+
+    示例:
+        最后一条模型回复 = "我来:\n```shell\nls\n```"  → True(继续下一轮)
+        最后一条模型回复 = "任务完成了"                → False(回合结束)
+    """
+    return any(tu.is_runnable for tu in tooluses_in_messages(messages))

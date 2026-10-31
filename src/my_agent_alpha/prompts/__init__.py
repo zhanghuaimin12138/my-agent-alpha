@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from pathlib import Path
 
+from my_agent_alpha.memory_store import render_memory_index
 from my_agent_alpha.message import Message, utcnow
 from my_agent_alpha.tools.base import ToolSpec
 
@@ -110,3 +112,18 @@ def get_prompt(
         hide=True,
     )
     return [static, dynamic]
+
+
+def session_opening_messages(
+    tools: Sequence[ToolSpec], *, native: bool, workspace: Path
+) -> list[Message]:
+    """新会话开场要写进日志的系统消息:说明书两条 + 长期记忆索引(有才加)。
+
+    记忆索引这条也标 pinned + hide:发给模型,但不在终端打印、压缩时不删
+    (gptme 的做法,64KB 预算)。
+    """
+    msgs = get_prompt(tools, native=native)
+    mem_index = render_memory_index(workspace)
+    if mem_index:
+        msgs.append(Message("system", mem_index, pinned=True, hide=True))
+    return msgs

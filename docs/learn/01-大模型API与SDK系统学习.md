@@ -29,6 +29,7 @@
 
 ```python
 from openai import OpenAI
+
 client = OpenAI(api_key="sk-...", base_url="https://api.deepseek.com")
 ```
 
@@ -382,18 +383,22 @@ PROVIDERS 里的默认模型名(gptme 的 get_available_models 就是这么实�
 ```python
 from openai import OpenAI
 import os
+
 c = OpenAI(api_key=os.environ["GLM_API_KEY"], base_url="https://open.bigmodel.cn/api/paas/v4")
-print(type(c))            # 一个普通的 Python 对象
-print(c.base_url)         # 配置就存在它身上
-for m in c.models.list(): # 白嫖一次接口:拉模型清单
+print(type(c))  # 一个普通的 Python 对象
+print(c.base_url)  # 配置就存在它身上
+for m in c.models.list():  # 白嫖一次接口:拉模型清单
     print(m.id)
 ```
 
 **实验 2:打印完整响应,对照第 4 节的树**
 ```python
-resp = c.chat.completions.create(model="glm-5.3",
-    messages=[{"role":"user","content":"用一句话介绍自己"}])
-import json; print(json.dumps(resp.model_dump(), ensure_ascii=False, indent=2))
+resp = c.chat.completions.create(
+    model="glm-5.3", messages=[{"role": "user", "content": "用一句话介绍自己"}]
+)
+import json
+
+print(json.dumps(resp.model_dump(), ensure_ascii=False, indent=2))
 ```
 逐个找到:id/created/model/choices[0].message.content/finish_reason/usage。
 
@@ -408,7 +413,7 @@ import json; print(json.dumps(resp.model_dump(), ensure_ascii=False, indent=2))
 **实验 5:错误体感(不用花一分钱)**
 ```python
 c2 = OpenAI(api_key="sk-错的", base_url="https://open.bigmodel.cn/api/paas/v4")
-c2.chat.completions.create(model="glm-5.3", messages=[{"role":"user","content":"hi"}])
+c2.chat.completions.create(model="glm-5.3", messages=[{"role": "user", "content": "hi"}])
 ```
 看异常类型 `AuthenticationError` 和 `.status_code == 401`;
 再试不存在的模型名 → `NotFoundError`;再试 `base_url` 写个不存在的端口,

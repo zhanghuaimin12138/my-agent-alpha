@@ -1,0 +1,598 @@
+{
+  "timestamp": "2026-10-25 01:12:38",
+  "model": "glm-coding",
+  "repeat": 1,
+  "tool_prompt_sha256": "8c56007243ee",
+  "runs": [
+    {
+      "id": "tc-shell-001",
+      "level": "D1",
+      "repeat_index": 1,
+      "duration": 7.88,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "shell: command=ls -la"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2136,
+        "output": 33
+      }
+    },
+    {
+      "id": "tc-shell-002",
+      "level": "D1",
+      "repeat_index": 1,
+      "duration": 5.16,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "shell: command=pwd"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2132,
+        "output": 29
+      }
+    },
+    {
+      "id": "tc-read-001",
+      "level": "D1",
+      "repeat_index": 1,
+      "duration": 9.3,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "read: path=config.toml"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2133,
+        "output": 28
+      }
+    },
+    {
+      "id": "tc-read-002",
+      "level": "D1",
+      "repeat_index": 1,
+      "duration": 5.87,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "read: path=src/app.py"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2135,
+        "output": 32
+      }
+    },
+    {
+      "id": "tc-todo-001",
+      "level": "D1",
+      "repeat_index": 1,
+      "duration": 11.5,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "todo: command=read"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2134,
+        "output": 32
+      }
+    },
+    {
+      "id": "tc-todo-002",
+      "level": "D1",
+      "repeat_index": 1,
+      "duration": 3.63,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "todo: command=add 梳理需求"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2139,
+        "output": 16
+      }
+    },
+    {
+      "id": "tc-subagent-001",
+      "level": "D1",
+      "repeat_index": 1,
+      "duration": 10.39,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "subagent: prompt=请调查 /tmp 目录下最大的三个文件(仅统计文件,不统计目录)。要求:\n1. 用 shell 命令查找,例如:find /tmp -maxdepth 5 -type f -exec du -h {} + 2>/dev/null | sort -rh | head -5\n2. 返回前三大文件的名字(完整路径)和大小(人类可读格式,如 12M)\n3. 如果并列或权限不足导致部分文件无法统计,请说明\n请直接返回最终结论:三个文件的路径和大小。 tools=shell"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2146,
+        "output": 187
+      }
+    },
+    {
+      "id": "tc-save-001",
+      "level": "D2",
+      "repeat_index": 1,
+      "duration": 19.31,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "save: path=config/notes.txt content=LINE1=包含\"双引号\"和\\反斜杠\\;LINE2=中文与 emoji 🎉"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2181,
+        "output": 406
+      }
+    },
+    {
+      "id": "tc-save-002",
+      "level": "D2",
+      "repeat_index": 1,
+      "duration": 22.36,
+      "infra_error": null,
+      "fail_level": "S2",
+      "passed": false,
+      "reasons": [
+        "调用数量或工具不符:期望 ['save'],实得 ['append']"
+      ],
+      "native_calls": [
+        "append: content=settings = {\"mode\": \"fast\", \"retries\": 3} path=data/dump.txt"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2165,
+        "output": 459
+      }
+    },
+    {
+      "id": "tc-shell-003",
+      "level": "D2",
+      "repeat_index": 1,
+      "duration": 4.74,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "shell: command=echo \"done: 100%\""
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2138,
+        "output": 36
+      }
+    },
+    {
+      "id": "tc-append-001",
+      "level": "D2",
+      "repeat_index": 1,
+      "duration": 3.18,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "append: content=第三步:重试成功 ✅(用时 3s) path=log.md"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2153,
+        "output": 49
+      }
+    },
+    {
+      "id": "tc-append-003",
+      "level": "D2",
+      "repeat_index": 1,
+      "duration": 4.92,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "append: path=scratch.md content=hello world"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2139,
+        "output": 43
+      }
+    },
+    {
+      "id": "tc-edit-001",
+      "level": "D2",
+      "repeat_index": 1,
+      "duration": 7.07,
+      "infra_error": null,
+      "fail_level": "S2",
+      "passed": false,
+      "reasons": [
+        "调用数量或工具不符:期望 ['edit'],实得 ['read']"
+      ],
+      "native_calls": [
+        "read: path=a.py"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2145,
+        "output": 42
+      }
+    },
+    {
+      "id": "tc-edit-002",
+      "level": "D2",
+      "repeat_index": 1,
+      "duration": 6.51,
+      "infra_error": null,
+      "fail_level": "S2",
+      "passed": false,
+      "reasons": [
+        "调用数量或工具不符:期望 ['edit'],实得 ['read']"
+      ],
+      "native_calls": [
+        "read: path=src/app.py"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2159,
+        "output": 174
+      }
+    },
+    {
+      "id": "tc-memory-001",
+      "level": "D2",
+      "repeat_index": 1,
+      "duration": 9.19,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "memory: action=save content=---\ndescription: 生产服务器 IP 10.0.0.1,SSH 端口 22\ntype: reference\n---\n生产服务器地址:10.0.0.1,SSH 端口:22 name=生产服务器 type=reference"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2151,
+        "output": 297
+      }
+    },
+    {
+      "id": "tc-grep-001",
+      "level": "D3",
+      "repeat_index": 1,
+      "duration": 4.76,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "grep: pattern=TODO"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2134,
+        "output": 11
+      }
+    },
+    {
+      "id": "tc-grep-002",
+      "level": "D3",
+      "repeat_index": 1,
+      "duration": 4.76,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "grep: pattern=TODO path=src glob=*.py"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2139,
+        "output": 46
+      }
+    },
+    {
+      "id": "tc-grep-003",
+      "level": "D3",
+      "repeat_index": 1,
+      "duration": 1.81,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "grep: pattern=api_version"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2137,
+        "output": 34
+      }
+    },
+    {
+      "id": "tc-memory-002",
+      "level": "D3",
+      "repeat_index": 1,
+      "duration": 4.5,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "memory: action=delete name=部署流程"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2141,
+        "output": 81
+      }
+    },
+    {
+      "id": "tc-memory-003",
+      "level": "D3",
+      "repeat_index": 1,
+      "duration": 5.45,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "memory: action=save content=---\ndescription: 用户正在学习 Rust 语言\ntype: user\nscope: user\n---\n\n用户正在学 Rust description=用户正在学习 Rust 语言(跨项目有效) name=learning-rust scope=user type=user"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2144,
+        "output": 151
+      }
+    },
+    {
+      "id": "tc-subagent-002",
+      "level": "D3",
+      "repeat_index": 1,
+      "duration": 6.9,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "subagent: tools=read,grep prompt=请统计当前工作区中 README.md 文件的总行数。你可以使用 read 工具读取该文件(输出带行号,最后一行的行号即总行数),必要时也可用 grep 辅助。完成后在最终回复中明确给出:README.md 一共有多少行(报告最后一行的行号作为总行数,并注明文件末尾是否有换行符情况,如果无法判断就只给行号)。"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2150,
+        "output": 158
+      }
+    },
+    {
+      "id": "tc-subagent-003",
+      "level": "D3",
+      "repeat_index": 1,
+      "duration": 5.58,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "subagent: model=glm prompt=请读取当前工作区的 README.md 文件,然后用不超过 50 字的中文概括它的核心内容(项目是什么、做什么用)。直接返回这段概括,不要多余说明。 tools=read"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2149,
+        "output": 90
+      }
+    },
+    {
+      "id": "tc-edit-003",
+      "level": "D4",
+      "repeat_index": 1,
+      "duration": 5.37,
+      "infra_error": null,
+      "fail_level": "S2",
+      "passed": false,
+      "reasons": [
+        "调用数量或工具不符:期望 ['edit'],实得 ['read']"
+      ],
+      "native_calls": [
+        "read: path=config.toml"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2144,
+        "output": 75
+      }
+    },
+    {
+      "id": "tc-edit-004",
+      "level": "D4",
+      "repeat_index": 1,
+      "duration": 4.63,
+      "infra_error": null,
+      "fail_level": "S2",
+      "passed": false,
+      "reasons": [
+        "调用数量或工具不符:期望 ['edit'],实得 ['read']"
+      ],
+      "native_calls": [
+        "read: path=src/app.py"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2157,
+        "output": 70
+      }
+    },
+    {
+      "id": "tc-grep-004",
+      "level": "D4",
+      "repeat_index": 1,
+      "duration": 8.0,
+      "infra_error": null,
+      "fail_level": "S4",
+      "passed": false,
+      "reasons": [
+        "参数值不符:[grep] 参数 pattern 期望 'fetch_data',实得 'fetch_data\\\\s*\\\\(';[grep] 自造参数 path='src'(题目没要求)"
+      ],
+      "native_calls": [
+        "grep: pattern=fetch_data\\s*\\( path=src"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2155,
+        "output": 88
+      }
+    },
+    {
+      "id": "tc-append-002",
+      "level": "D4",
+      "repeat_index": 1,
+      "duration": 3.09,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "append: path=todo.txt content=买牛奶"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2150,
+        "output": 110
+      }
+    },
+    {
+      "id": "tc-todo-003",
+      "level": "D4",
+      "repeat_index": 1,
+      "duration": 5.31,
+      "infra_error": null,
+      "fail_level": "S4",
+      "passed": false,
+      "reasons": [
+        "参数值不符:[todo] 参数 command 期望 'update 1 state=completed',实得 'read'"
+      ],
+      "native_calls": [
+        "todo: command=read"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2142,
+        "output": 74
+      }
+    },
+    {
+      "id": "tc-save-003",
+      "level": "D5",
+      "repeat_index": 1,
+      "duration": 6.91,
+      "infra_error": null,
+      "fail_level": "S4",
+      "passed": false,
+      "reasons": [
+        "参数值不符:[save] 参数 content 期望 \"print('hello')\",实得 \"print('hello')\\n\";[save] 参数 content 期望 \"print('bye')\",实得 \"print('bye')\\n\""
+      ],
+      "native_calls": [
+        "save: path=hello.py content=print('hello')\n",
+        "save: path=bye.py content=print('bye')\n"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 2,
+      "usage": {
+        "input": 2151,
+        "output": 81
+      }
+    },
+    {
+      "id": "tc-read-003",
+      "level": "D5",
+      "repeat_index": 1,
+      "duration": 11.68,
+      "infra_error": null,
+      "fail_level": "PASS",
+      "passed": true,
+      "reasons": [],
+      "native_calls": [
+        "read: path=a.py",
+        "read: path=b.py"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 2,
+      "usage": {
+        "input": 2138,
+        "output": 185
+      }
+    },
+    {
+      "id": "tc-todo-004",
+      "level": "D5",
+      "repeat_index": 1,
+      "duration": 2.7,
+      "infra_error": null,
+      "fail_level": "S2",
+      "passed": false,
+      "reasons": [
+        "调用数量或工具不符:期望 ['todo', 'todo'],实得 ['todo']"
+      ],
+      "native_calls": [
+        "todo: command=add 修复登录页空指针"
+      ],
+      "markdown_calls": 0,
+      "raw_at_lines": 1,
+      "usage": {
+        "input": 2147,
+        "output": 29
+      }
+    }
+  ]
+}

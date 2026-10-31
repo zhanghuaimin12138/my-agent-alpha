@@ -62,7 +62,7 @@ def _is_transient(exc: BaseException) -> bool:
 def msgs2dicts(messages: Sequence[Message]) -> list[dict[str, object]]:
     """把我们的 Message 列 history 转成接口要求的格式。
 
-    除了"照抄",还要做原生工具调用的双向转换(见学习文档 §3):
+    要做原生工具调用的双向转换(见学习文档 §3):
     - assistant 消息里的 "@工具名(编号): {参数}" 行 → 转回接口的 tool_calls 字段
       (接口不认识我们的文本记法,要翻译回去);
     - 带 call_id 的 system 消息(工具结果)→ 转成接口的 tool 角色;

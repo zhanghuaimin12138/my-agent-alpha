@@ -28,7 +28,7 @@ import sys
 from collections.abc import Iterator, Sequence
 
 from my_agent_alpha.context import get_current_model, get_workspace
-from my_agent_alpha.dirs import get_logs_dir
+from my_agent_alpha.dirs import get_session_root
 from my_agent_alpha.logmanager import generate_conversation_id
 from my_agent_alpha.message import Message
 from my_agent_alpha.tools.base import Parameter, ToolSpec
@@ -92,7 +92,7 @@ def run_subagent(
         )
         return
 
-    result = _last_assistant_text(get_logs_dir() / name / "conversation.jsonl")
+    result = _last_assistant_text(get_session_root(get_workspace()) / name / "conversation.jsonl")
     if result is None:
         yield Message("system", f"✗ 子代理 {name} 完成,但日志里没有回复")
         return

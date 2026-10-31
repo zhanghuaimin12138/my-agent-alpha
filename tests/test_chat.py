@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from my_agent_alpha import LogManager, Message
-from my_agent_alpha.chat import has_runnable_tooluse
 from my_agent_alpha.llm.mock import set_scripted_replies
+from my_agent_alpha.tools.base import has_runnable_tooluse
 
 
 def test_has_runnable_tooluse(workspace: Path) -> None:
@@ -134,9 +134,8 @@ def test_exit_command(logdir: Path, workspace: Path) -> None:
             model="mock/echo",
             non_interactive=True,
         )
-    # /exit 不产生用户消息
-    manager = LogManager.load(logdir)
-    assert not any(m.role == "user" for m in manager.messages)
+    # /exit 不产生用户消息:只输过命令 = 没人聊过,整个会话目录被清理
+    assert not logdir.exists()
 
 
 def test_unknown_slash_treated_as_text(logdir: Path, workspace: Path) -> None:
@@ -173,9 +172,9 @@ def test_resume_session_reuses_log(logdir: Path, workspace: Path) -> None:
 
 def test_user_input_bad_unicode_cleaned(monkeypatch: pytest.MonkeyPatch) -> None:
     """终端传来坏字符(落单代理)时入口先清洗,不让它进日志把程序写崩。"""
-    from my_agent_alpha.chat import _get_user_input
+    from my_agent_alpha.tui import read_user_input
 
     monkeypatch.setattr("builtins.input", lambda _: "\ud800有雨吗")
-    msg = _get_user_input()
+    msg = read_user_input()
     assert msg is not None
     assert msg.content == "?有雨吗"

@@ -9,11 +9,12 @@ from typing import Any
 import pytest
 
 from my_agent_alpha import LogManager, Message
-from my_agent_alpha.chat import _StreamPrinter, chat
+from my_agent_alpha.chat import chat
 from my_agent_alpha.codeblock import iter_from_markdown
 from my_agent_alpha.llm import reply
 from my_agent_alpha.llm.mock import set_scripted_replies
 from my_agent_alpha.message import INTERRUPT_CONTENT
+from my_agent_alpha.tui import StreamPrinter
 
 # ---- 流式契约:分块消费 + usage 捕获 ----
 
@@ -92,7 +93,7 @@ def test_e2e_break_then_execute(logdir: Path, workspace: Path) -> None:
 
 def test_think_rendered_dim_without_literal_tags(capsys: pytest.CaptureFixture[str]) -> None:
     set_scripted_replies(["<think>先想想</think>正文回答"])
-    reply([Message("user", "q")], "mock/echo", on_token=_StreamPrinter().token)
+    reply([Message("user", "q")], "mock/echo", on_token=StreamPrinter().token)
     out = capsys.readouterr().out
     assert "正文回答" in out
     # think 内容在,且带暗色 ANSI(标签被消费,不打印字面量)
@@ -106,7 +107,7 @@ def test_think_rendered_dim_without_literal_tags(capsys: pytest.CaptureFixture[s
 def test_printer_handles_tags_split_across_chunks(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    printer = _StreamPrinter()
+    printer = StreamPrinter()
     # 手工喂会切断标签的块
     for chunk in ["<th", "ink>隐", "私推理</th", "ink>结", "论"]:
         printer.token(chunk)

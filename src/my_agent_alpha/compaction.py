@@ -24,9 +24,13 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
+from my_agent_alpha.context import get_logdir
+from my_agent_alpha.llm.models import resolve_model
 from my_agent_alpha.message import Message
+from my_agent_alpha.utils import get_context_budget, len_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -40,44 +44,6 @@ _RECENT_KEEP = 5
 _COMPRESS_RATIO = 0.7
 # 思考块的正则(非贪婪匹配,含换行)
 _THINK_RE = re.compile(r"<think>.*?</think>\n?", re.DOTALL)
-
-
-def estimate_tokens(text: str) -> int:
-    """粗略估算一段文字的 token 数(不装分词库,够用就好)。
-
-    经验值:英文约 4 个字符一个 token,中文约 1.5 个字符一个 token。
-    不同模型的分词略有差异,但对"要不要压缩"的决策来说足够准;
-    真实用量以接口返回的 usage 为准(日志里每条回复都记着)。
-    """
-    ascii_len = sum(1 for c in text if ord(c) < 128)
-    other_len = len(text) - ascii_len
-    return (ascii_len + 3) // 4 + (other_len * 2 + 2) // 3
-
-
-def messages_tokens(messages: list[Message]) -> int:
-    """估算一批消息的总 token 数。"""
-    return sum(estimate_tokens(m.content) for m in messages)
-
-
-def get_context_budget(context_window: int, max_output: int = 8192, headroom: int = 1000) -> int:
-    """计算"历史最多能占多少 token"(预算)。
-
-    背景:模型的上下文窗口是输入和输出**共用**的 —— 模型是在窗口里
-    接着历史往下写回复的。历史把窗口塞满,模型就没地方"说话"了
-    (回复被截断,甚至一个字都写不出来直接报错)。
-    所以要提前给历史设上限,给回复留好位置。
-
-    两个约束取更严的(小的)那个:
-    - 窗口的 9 成:任何窗口都不用到极限;
-    - 窗口 - max_output(预留回复空间,默认 8192)- headroom
-      (安全余量 1000,兜住 token 估算的误差)。
-
-    示例:128k 窗口 → min(115200, 118808) = 115200;
-         32k 窗口 → min(28800, 22808)  = 22808;
-         8k 窗口  → 减完是负数,走保底 1000(至少塞得下提示词+最近几条,
-                                          代价是回复可能被截断,能跑比崩强)。
-    """
-    return max(min(int(context_window * 0.9), context_window - max_output - headroom), 1000)
 
 
 def strip_old_thinking(messages: list[Message]) -> list[Message]:
@@ -106,7 +72,7 @@ def truncate_tool_results(
     决定 —— 同一条消息反复压缩也只存一份)。
     """
     result = list(messages)
-    while messages_tokens(result) > budget:
+    while len_tokens(result) > budget:
         # 找当前最长、且可截(pinned/hide 的不动,已截过的跳过)的工具结果
         target_idx = -1
         target_size = 0
@@ -115,7 +81,7 @@ def truncate_tool_results(
                 continue
             if msg.content.startswith("[内容已截断"):
                 continue
-            size = estimate_tokens(msg.content)
+            size = len_tokens(msg.content)
             if size > _TOOL_RESULT_THRESHOLD and size > target_size:
                 target_idx, target_size = i, size
         if target_idx < 0:
@@ -216,7 +182,7 @@ def compress_long_replies(messages: list[Message]) -> list[Message]:
         msg = result[i]
         if msg.role != "assistant" or "```" in msg.content or "@" in msg.content:
             continue
-        if estimate_tokens(msg.content) < _LONG_REPLY_THRESHOLD:
+        if len_tokens(msg.content) < _LONG_REPLY_THRESHOLD:
             continue
         result[i] = Message("assistant", compress_reply(msg.content), timestamp=msg.timestamp)
     return result
@@ -227,15 +193,15 @@ def hard_cap(messages: list[Message], budget: int) -> list[Message]:
 
     (走到这一步说明规则压缩救不回来,宁可丢最旧的非 pinned 历史也不让请求失败)
     """
-    if messages_tokens(messages) <= budget:
+    if len_tokens(messages) <= budget:
         return messages
     pinned = [m for m in messages if m.pinned]
     tail: list[Message] = []
-    used = messages_tokens(pinned)
+    used = len_tokens(pinned)
     for msg in reversed(messages):
         if msg.pinned:
             continue
-        cost = estimate_tokens(msg.content)
+        cost = len_tokens(msg.content)
         if used + cost > budget and tail:
             break  # 至少保留一条,避免极端小预算下空上下文
         tail.append(msg)
@@ -254,11 +220,25 @@ def compact_messages(
         # view 只用于发送;log.messages 本身没变
     """
     result = strip_old_thinking(messages)
-    if messages_tokens(result) <= budget:
+    if len_tokens(result) <= budget:
         return result
     result = truncate_tool_results(result, budget, logdir)
-    if messages_tokens(result) > budget:
+    if len_tokens(result) > budget:
         result = compress_long_replies(result)
-    if messages_tokens(result) > budget:
+    if len_tokens(result) > budget:
         result = hard_cap(result, budget)
     return result
+
+
+def prepare_messages(
+    messages: Sequence[Message], model: str, budget: int | None = None
+) -> list[Message]:
+    """决定"发给模型哪些消息":超预算时压缩视图,日志本身不动。
+
+    - budget 不传时按模型的上下文窗口自动算(见上方 get_context_budget);
+    - 压缩只改这份返回值(视图),log.messages 原封不动 —— 磁盘日志永不改写;
+    - 详细的压缩规则见本模块上文(剥思考 → 截工具结果 → 压长回复 → 硬截断)。
+    """
+    meta = resolve_model(model)
+    effective = budget if budget is not None else get_context_budget(meta.context)
+    return compact_messages(list(messages), effective, get_logdir())

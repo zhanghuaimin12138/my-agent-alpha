@@ -16,10 +16,25 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from my_agent_alpha.logmanager import LogManager
+from my_agent_alpha.logmanager.sessions import SessionMeta
 
 # 命令处理器:拿到上下文,做任何事(通常打印)
 CommandHandler = Callable[["CommandContext"], None]
 # 函数变量，传入上下文(有manager和model)，返回none的函数
+
+
+class ResumeRequested(Exception):
+    """/resume 命令请求切换会话。
+
+    命令层只负责"找到目标",真正的切换(换 manager、更新指针、回放历史)
+    由 chat.py 的 REPL 循环捕获本异常后执行 —— 子层请求上层做事的标准
+    通道,与 /exit 抛 SystemExit 同款思路。
+    """
+
+    def __init__(self, meta: SessionMeta) -> None:
+        """记下要切换到的目标会话元信息。"""
+        super().__init__(meta.session_id)
+        self.meta = meta
 
 
 @dataclass(frozen=True)
@@ -34,6 +49,7 @@ class CommandContext:
     full: str  # 命令名之后的完整原文(参数里要保留空格时用它)
     manager: LogManager  # 会话管理器(可查消息、可追加)
     model: str  # 当前模型名
+    non_interactive: bool = False  # 是否脚本模式(-n):个别命令(如 /resume 的提示语)要看它
 
 
 # 注册表:命令名/别名 → 处理器
@@ -78,7 +94,9 @@ def get_commands() -> dict[str, CommandHandler]:
     return dict(_commands)
 
 
-def execute_cmd(content: str, manager: LogManager, model: str) -> bool:
+def execute_cmd(
+    content: str, manager: LogManager, model: str, *, non_interactive: bool = False
+) -> bool:
     """处理一条用户输入:是已注册命令就执行,返回 True;否则返回 False
     (调用方应把它当普通对话内容处理)。
 
@@ -96,6 +114,7 @@ def execute_cmd(content: str, manager: LogManager, model: str) -> bool:
         full=rest.strip(),
         manager=manager,
         model=model,
+        non_interactive=non_interactive,
     )
     handler(ctx)
     return True
