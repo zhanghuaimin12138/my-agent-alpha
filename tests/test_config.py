@@ -95,8 +95,8 @@ def test_effective_model_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 def test_effective_tool_format_and_max_steps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert effective_tool_format(None, Config()) == "markdown"  # 默认
-    assert effective_tool_format("tool", Config()) == "tool"
-    assert effective_tool_format(None, Config(tool_format="tool")) == "tool"
+    assert effective_tool_format(None, Config()) == "tool"  # 默认 = 原生工具调用
+    assert effective_tool_format("markdown", Config()) == "markdown"
+    assert effective_tool_format(None, Config(tool_format="markdown")) == "markdown"
     assert effective_max_steps(Config(max_steps=7), env_default=50) == 7
     assert effective_max_steps(Config(), env_default=50) == 50

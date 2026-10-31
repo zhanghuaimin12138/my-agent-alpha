@@ -144,13 +144,13 @@ def effective_model(cli_value: str | None, config: Config) -> str:
 
 
 def effective_tool_format(cli_value: str | None, config: Config) -> str:
-    """决定工具调用通道,优先级同 effective_model。"""
+    """决定工具调用通道,优先级同 effective_model。默认 tool(原生 function calling)。"""
     if cli_value:
         return cli_value
     env_value = os.environ.get("ALPHA_TOOL_FORMAT")
     if env_value:
         return env_value
-    return config.tool_format or "markdown"
+    return config.tool_format or "tool"
 
 
 def effective_max_steps(config: Config, env_default: int) -> int:

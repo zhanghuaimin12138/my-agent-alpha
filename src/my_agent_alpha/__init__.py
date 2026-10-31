@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> None:
             "--tool-format",
             choices=["markdown", "tool"],
             default=None,
-            help="工具调用通道:markdown(围栏代码块)或 tool(原生 function calling)",
+            help="工具调用通道:tool(原生 function calling,默认)或 markdown(围栏代码块)",
         )
         parser.add_argument(
             "-y", "--yes", action="store_true", help="全部自动确认(安全护栏仍然生效)"

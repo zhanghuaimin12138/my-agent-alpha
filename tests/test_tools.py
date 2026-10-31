@@ -54,6 +54,20 @@ def test_langtag_lookup() -> None:
     assert get_tool_for_langtag("python") is None  # 未注册的 langtag 不是工具
 
 
+def test_shell_stateless_across_calls(workspace: Path) -> None:
+    """shell 每次调用都是独立进程:上一次的 cd 不会留到下一次。
+
+    模型容易以为终端是"一个持续会话",写出依赖上一次 cd 的命令;
+    行为(第二次 pwd 仍在工作区)和说明书(写明每次全新 bash 进程)一起锁。
+    """
+    shell = get_tool("shell")
+    assert shell is not None and shell.execute is not None
+    list(shell.execute("cd ..", None, None))  # 第一次:切到上级目录
+    results = list(shell.execute("pwd", None, None))  # 第二次:看当前目录
+    assert str(workspace) in results[0].content  # 还在工作区,cd 没有留下来
+    assert "全新的 bash 进程" in shell.instructions  # 说明书如实写明无状态
+
+
 def test_iter_from_content_maps_fences(workspace: Path) -> None:
     content = "我来执行:\n```shell\necho hi\n```\n再读文件:\n```read src/a.py\na.py\n```"
     uses = list(ToolUse.iter_from_content(content))

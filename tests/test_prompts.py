@@ -50,3 +50,21 @@ def test_old_rule_merged_not_left_in_protocol() -> None:
     assert "6." not in text  # 协议列表只有 1-5,第 6 条内容并入了行动纪律
     # 行动纪律紧跟在协议之后,而不是躲在列表末尾(更显眼)
     assert text.index("# 工具调用协议") < text.index("# 行动纪律")
+
+
+def test_identity_positions_coding_agent() -> None:
+    """两个通道的身份都定位为 coding agent(写代码为主 + 能跑日常命令)。"""
+    for native in (False, True):
+        text = _static(native=native)
+        assert "coding agent" in text
+        assert "普通终端命令" in text  # 不只写代码,日常命令也接
+
+
+def test_identity_has_coding_discipline() -> None:
+    """编码任务纪律:写完当场验证修到通过;大任务先用 todo 拆清单再推进。"""
+    for native in (False, True):
+        text = _static(native=native)
+        assert "# 编码任务纪律" in text
+        assert "todo" in text  # 一次做不完 → 拆待办,清单没清空不算完成
+        assert "pytest" in text  # 写完必须当场跑检查,不许推给用户
+        assert "先读相关代码" in text  # 动手前先看代码,不凭猜写作
