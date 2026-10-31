@@ -146,7 +146,7 @@ def _run_chat_loop(
     model: str,
     *,
     non_interactive: bool,
-    tool_format: str = "markdown",
+    tool_format: str = "tool",
 ) -> LogManager:
     """外层主循环:不断取下一条输入(命令行参数或终端输入),交给中层处理。"""
     while True:
@@ -205,7 +205,7 @@ def _run_chat_loop(
 
 
 def _process_message_conversation(
-    manager: LogManager, model: str, tool_format: str = "markdown"
+    manager: LogManager, model: str, tool_format: str = "tool"
 ) -> None:
     """处理一条用户输入:反复执行 step(),直到模型不再要工具或步数到上限。
 
@@ -267,7 +267,7 @@ def step(
     log_messages: Sequence[Message],
     model: str,
     on_token: Callable[[str], None] | None = None,
-    tool_format: str = "markdown",
+    tool_format: str = "tool",
     budget: int | None = None,
 ) -> Iterator[Message]:
     """执行一轮: llm调用 + 解析工具输出 + yield msgs(不落盘)。
@@ -277,8 +277,8 @@ def step(
 
     on_token:模型每生成一小段文字就调用一次这个函数(终端实时显示用;
     传 None 就不显示)。检测到完整工具调用时提前停止生成,逻辑在 reply() 里。
-    tool_format:"markdown"(默认,围栏代码块约定)或 "tool"(原生工具调用,
-    工具表会随请求发给接口)。两种方式执行的还是同一批工具函数。
+    tool_format:"tool"(默认,原生工具调用,工具表会随请求发给接口)
+    或 "markdown"(围栏代码块约定)。两种方式执行的还是同一批工具函数。
 
     示例(一轮里通常发生的事):
         yield 模型回复("我来执行:\n```shell\nls\n```")

@@ -32,7 +32,7 @@ uv run my-agent-alpha            # 进入交互对话
 uv run my-agent-alpha -m deepseek/deepseek-chat -y "帮我看看这个项目"
 ```
 
-常用参数:`-m` 指定模型、`-n` 跑完队列提示词即退出、`--tool-format` 选工具调用通道、`--tools` 工具白名单、`-y` 自动确认。
+常用参数:`-m` 指定模型、`-n` 跑完队列提示词即退出、`--tool-format` 选工具调用通道(默认 `tool` 即原生 function calling,可切回 `markdown` 围栏代码块)、`--tools` 工具白名单、`-y` 自动确认。
 
 ## 文档
 
