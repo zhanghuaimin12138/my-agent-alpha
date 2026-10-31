@@ -131,10 +131,17 @@ gptme 里叫 **profile(代理档案)**:一个名字对应一套
 @dataclass
 class Finding:
     severity: Literal["高", "中", "低"]
-    file: str; line: int; title: str; detail: str; suggestion: str
+    file: str
+    line: int
+    title: str
+    detail: str
+    suggestion: str
+
+
 @dataclass
 class ReviewReport:
-    findings: list[Finding]; verdict: Literal["通过", "整改后可合", "打回"]
+    findings: list[Finding]
+    verdict: Literal["通过", "整改后可合", "打回"]
 ```
 
 ### 3.3 L3 编排层:异步三件套(派发即返 / 通知 / 控制)
@@ -333,7 +340,7 @@ v2 加一个合并代理做去重和终审 —— 它只读三份报告,不读�
 def strict_readonly_hook(tooluse: ToolUse) -> ConfirmationResult | None:
     """ALPHA_SHELL_READONLY=1 时,shell 里非只读命令一律拒绝(fail-closed)。"""
     if os.environ.get("ALPHA_SHELL_READONLY") != "1":
-        return None                      # 开关没开,行为不变
+        return None  # 开关没开,行为不变
     if tooluse.tool.name != "shell":
         return None
     command = tooluse.kwargs.get("command") if tooluse.kwargs else tooluse.content
