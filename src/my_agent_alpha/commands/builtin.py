@@ -76,7 +76,14 @@ def log_cmd(ctx: CommandContext) -> None:
     print(f"  会话目录:{ctx.manager.logdir}")
     if title:
         print(f"  会话标题:{title}")
-    print(f"  消息条数:{len(ctx.manager)}")
+    # 消息条数报完整历史(压缩不能让会话"看起来变短");激活了视图再补一行
+    # 说明模型实际读的是哪份,避免看到两个数字不一样以为出了错
+    print(f"  消息条数:{len(ctx.manager.master_messages)}(完整历史)")
+    if ctx.manager.current_view is not None:
+        print(
+            f"  当前视图:{ctx.manager.current_view} · "
+            f"{len(ctx.manager.messages)} 条(模型读这份压缩后的)"
+        )
 
 
 @command("resume")

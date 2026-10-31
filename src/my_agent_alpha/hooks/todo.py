@@ -132,12 +132,14 @@ def todo_gate_hook(manager: LogManager, **_ctx: object) -> Iterator[Message]:
 def replay_todo_hook(manager: LogManager, **_ctx: object) -> Iterator[Message]:
     """session.start 重放:扫日志里的 todo 调用,重建清单状态。
 
+    读完整历史(master_messages)而不是压缩后的视图:todo 的 add/update
+    可能早已被压缩掉,用视图重放会漏掉那些状态变更,重启后清单就错了。
     只重演会改状态的操作(add/update/remove/clear,read 跳过);
     坏命令静默跳过 —— 状态停在最后一个有效操作上(对照 gptme 的 _replay)。
     先 reset_todos 再重放:同进程第二次 chat() 时不会叠加出重复条目。
     """
     reset_todos()
-    for msg in manager.messages:
+    for msg in manager.master_messages:
         if msg.role != "assistant":
             continue
         for tu in ToolUse.iter_from_content(msg.content):
