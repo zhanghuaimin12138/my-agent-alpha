@@ -5,5 +5,6 @@ from my_agent_alpha.logmanager.manager import (
     LogManager,
     generate_conversation_id,
 )
+from my_agent_alpha.logmanager.views import ViewState
 
-__all__ = ["Log", "LogManager", "generate_conversation_id"]
+__all__ = ["Log", "LogManager", "ViewState", "generate_conversation_id"]
