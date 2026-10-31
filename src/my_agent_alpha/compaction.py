@@ -320,7 +320,8 @@ def _is_llm_checkpoint(msg: Message) -> bool:
 
 
 def validate_compacted_messages(source: Sequence[Message], compacted: Sequence[Message]) -> None:
-    """激活视图前的校验:传入压缩后的msgs,判断是否是合格的压缩后产物，检查不通过就抛 ValueError,拒绝激活。
+    """激活视图前的校验:传入压缩后的 msgs,判断是否是合格的压缩后产物,
+    检查不通过就抛 ValueError,拒绝激活。
 
     检查四件事(见开发方案 §5.2.5):
     1. pinned 的系统提示词一条不少(它们是模型的身份/工具说明,丢了模型就失忆);

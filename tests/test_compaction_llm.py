@@ -26,14 +26,20 @@ from my_agent_alpha.compaction_llm import (
     CHECKPOINT_PREFIX,
     LLMCompactionConfig,
     assemble_semantic_view,
+    bound_summary_input,
+    build_chunk_request,
+    build_merge_request,
     build_summary_request,
+    chunk_prefix,
     compact_current_with_llm,
     digest_messages,
     find_checkpoint,
     split_for_semantic_compaction,
+    summary_input_budget,
     validate_summary,
 )
 from my_agent_alpha.message import Message
+from my_agent_alpha.utils import len_tokens
 
 
 def _code_history() -> list[Message]:
@@ -519,3 +525,182 @@ def test_reply_passes_max_output_tokens(monkeypatch: pytest.MonkeyPatch) -> None
 
     reply([Message("user", "hi")], "deepseek/deepseek-chat", break_on_tooluse=False)
     assert captured[-1]["max"] is None  # 不传:不向接口声明上限
+
+
+# ====================================================================
+# 步骤 3:摘要预算、单条裁剪与分块总结
+# ====================================================================
+
+
+def test_summary_input_budget() -> None:
+    """摘要请求自己的预算:大窗口够用,极小窗口扣完预留后干不了这活。"""
+    cfg = LLMCompactionConfig()
+    big = summary_input_budget(128_000, cfg)
+    assert big > 100_000  # 128k 窗口:扣掉输出与指令预留仍很宽裕
+    assert summary_input_budget(2_048, cfg) <= 0  # 2k 窗口:预留都装不下
+    # 预算随输出上限调节而变化(输出留得多,证据就塞得少)
+    assert summary_input_budget(8_192, LLMCompactionConfig(summary_max_output_tokens=512)) > (
+        summary_input_budget(8_192, LLMCompactionConfig(summary_max_output_tokens=2048))
+    )
+
+
+def test_bound_clips_long_messages() -> None:
+    """超长消息裁剪:保头保尾、中间省略标记,call_id 等字段保留。"""
+    long_tool = Message("system", "头部要点……" + "数据" * 3000 + "……尾部结论", call_id="call_7")
+    plain = Message("user", "短消息")
+
+    bounded = bound_summary_input([long_tool, plain], per_message_cap=100)
+
+    assert bounded[0].call_id == "call_7"  # 字段没丢
+    assert "头部要点" in bounded[0].content  # 头保留
+    assert "尾部结论" in bounded[0].content  # 尾保留
+    assert "内容已裁剪" in bounded[0].content  # 中间换省略标记
+    assert len_tokens(bounded[0].content) < 300  # 确实瘦了
+    assert bounded[1] is plain  # 短消息原对象原样
+
+
+def test_chunk_prefix_on_group_boundaries() -> None:
+    """切块边界只落在交互组之间;块数按预算自然产生。"""
+    prefix: list[Message] = []
+    for i in range(8):  # 8 条消息(问/答各自成组),每条约 800 tokens
+        prefix.append(Message("user", f"问{i}" + "细节" * 400))
+        prefix.append(Message("assistant", f"答{i}" + "说明" * 400))
+
+    chunks = chunk_prefix(prefix, chunk_budget=6_600)  # 每块约装 8 条
+
+    assert len(chunks) == 2
+    assert sum(len(c) for c in chunks) == len(prefix)  # 不丢消息
+    # 每块的边界都在组边界(这里即消息边界):不拆散任何一条
+    assert [c[0] for c in chunks] == [prefix[0], prefix[8]]
+
+
+def test_build_chunk_and_merge_requests() -> None:
+    """分块与合并请求的格式:声明"只是一段"、小结按序编号、旧笔记并入合并。"""
+    chunk = [Message("user", "问"), Message("assistant", "答")]
+    req = build_chunk_request(chunk)
+    assert "不是全部" in req[0].content  # 防止模型把一段当全局下结论
+    assert "[001][USER] 问" in req[1].content
+
+    merge = build_merge_request(["小结一", "小结二"], "上一份笔记全文")
+    assert "第 1 段小结" in merge[1].content and "第 2 段小结" in merge[1].content
+    assert "上一份笔记全文" in merge[1].content  # 旧笔记参与合并
+    assert "## Objective" in merge[0].content  # 合并沿用七节要求
+
+    with pytest.raises(ValueError, match="空的"):
+        build_chunk_request([])
+
+
+def _fake_model(monkeypatch: pytest.MonkeyPatch, context: int) -> None:
+    """把服务层用的模型解析换成指定窗口的假模型(不动 mock 通道)。"""
+    from my_agent_alpha import compaction_llm as clm
+    from my_agent_alpha.llm.models import ModelMeta
+
+    meta = ModelMeta(provider="mock", model="echo", context=context)
+    monkeypatch.setattr(clm, "resolve_model", lambda name: meta)
+
+
+def test_llm_compact_chunks_when_history_too_big(
+    logdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """历史超过摘要模型能装下的量:分块小结再合并,块诊断记入笔记元数据。"""
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    # 16k 窗口:证据预算约 10.7k;前缀 12 轮(每条约 600 tokens)≈ 13.8k → 分 2 块
+    _fake_model(monkeypatch, context=16_384)
+    msgs = [Message("system", "你是助手", pinned=True, hide=True)]
+    for i in range(12):
+        msgs.append(Message("user", f"问{i}" + "细节" * 300))
+        msgs.append(Message("assistant", f"答{i}" + "说明" * 300))
+    msgs.append(Message("user", "最新问题"))
+    manager = _seed_and_script(logdir, msgs)
+    set_scripted_replies(
+        ["第 1 段小结:前半段做了 A。", "第 2 段小结:后半段做了 B。", _good_summary()]
+    )
+
+    result = compact_current_with_llm(manager, model="mock/echo")
+
+    assert result.status == "success"
+    ckpt = find_checkpoint(manager.messages)
+    assert ckpt is not None
+    meta = (ckpt.metadata or {})["compaction"]
+    assert meta["chunked"] is True
+    assert meta["chunk_count"] == 2
+    ranges = meta["covered_ranges"]
+    assert ranges[0][0] == 0  # 从前缀第 0 条开始覆盖
+    assert sum(r[1] - r[0] for r in ranges) == ranges[-1][1]  # 区间首尾相接,不重不漏
+    assert ranges[-1][1] > 20  # 覆盖了前缀的绝大部分(不是只总结最后几条)
+    # 新视图明显小于原历史,最新意图还在
+    assert result.tokens_after is not None and result.tokens_after < result.tokens_before
+    assert "最新问题" in [m.content for m in manager.messages]
+
+
+def test_llm_compact_fails_over_chunk_limit(logdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """需要分块数超过上限:诚实失败,不假装覆盖了全部历史。"""
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    _fake_model(monkeypatch, context=16_384)
+    msgs = [Message("system", "你是助手", pinned=True, hide=True)]
+    for i in range(12):
+        msgs.append(Message("user", f"问{i}" + "细节" * 495))
+        msgs.append(Message("assistant", f"答{i}" + "说明" * 495))
+    msgs.append(Message("user", "最新问题"))
+    manager = _seed_and_script(logdir, msgs)
+    set_scripted_replies(["不应被用到"] * 8)
+    strict = LLMCompactionConfig(max_chunk_requests=1)  # 只许 1 块,实际要 2 块
+
+    result = compact_current_with_llm(manager, model="mock/echo", config=strict)
+
+    assert result.status == "failed"
+    assert "超过上限" in (result.reason or "")
+    assert manager.current_view is None  # 没有产出半吊子视图
+    assert not (logdir / "views" / "summaries").exists()
+
+
+def test_llm_compact_fails_tiny_window(logdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """窗口小到扣完预留后装不下历史证据:failed,一次模型调用都不发。
+
+    (历史很短时另说 —— 那种情况全部进尾部,走 skipped,不浪费钱。)
+    """
+    _fake_model(monkeypatch, context=2_048)
+    # 历史造长一点,确保有前缀(2k 窗口的尾部预算只装得下约 250 tokens)
+    manager = _seed_and_script(
+        logdir,
+        [
+            Message("system", "你是助手", pinned=True, hide=True),
+            Message("user", "旧话题一" + "细节" * 300),
+            Message("user", "旧话题二" + "细节" * 300),
+            Message("user", "最新问题"),
+        ],
+    )
+
+    result = compact_current_with_llm(manager, model="mock/echo")
+
+    assert result.status == "failed"
+    assert "窗口太小" in (result.reason or "")
+    assert manager.current_view is None
+
+
+def test_llm_compact_skips_when_new_view_over_budget(
+    logdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """压缩结果本身超正常模型预算(小窗口+胖笔记):skipped,不激活坏视图。"""
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    _fake_model(monkeypatch, context=4_096)
+    manager = _seed_and_script(
+        logdir,
+        [
+            Message("system", "你是助手", pinned=True, hide=True),
+            Message("user", "旧话题一" + "细节" * 300),
+            Message("user", "旧话题二" + "细节" * 300),
+            Message("user", "最新问题"),
+        ],
+    )
+    fat_summary = _good_summary() + "\n附注:" + "x" * 3600  # 约 900+ tokens 的胖笔记
+    set_scripted_replies([fat_summary])
+
+    result = compact_current_with_llm(manager, model="mock/echo")
+
+    assert result.status == "skipped"
+    assert "超正常模型预算" in (result.reason or "")
+    assert manager.current_view is None
