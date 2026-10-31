@@ -1,6 +1,6 @@
 # my-agent-alpha
 
-一个跑在终端里的个人 AI agent:对话、执行 shell/Python、读写文件、多步自主体完成任务。
+一个跑在终端里的个人 AI agent:对话、执行 shell 命令、读写文件、多步自主体完成任务。
 
 三条核心设计原则,贯穿全部模块:
 
@@ -12,14 +12,13 @@
 
 - **对话循环**:三层结构(输入 → turn → step),流式生成,`Ctrl-C` 中断保留已生成内容;
 - **双格式工具调用**:markdown 围栏代码块 与 原生 function calling 共用一套执行端,`call_id` 严格配对;
-- **工具箱**:shell(只读命令放行、灾难命令硬拦)、Python、read / save / edit / grep、todo(完成门控)、subagent(白名单)、memory;
+- **工具箱**:shell(只读命令放行、灾难命令硬拦,每次调用独立进程)、read / save / edit / grep、todo(完成门控)、subagent(白名单)、memory;
 - **确认链**:y / n / e / a 终端询问,`-y` 自主模式(安全护栏仍然生效);
-- **上下文压缩**:token 预算、三阶段规则压缩、溢出自愈、自动压缩,主日志永不销毁;
-- **通用 hook 系统** + slash 命令(`/log`、`/resume`、`/memory` 等)+ 分层 TOML 配置(命令行 > 环境变量 > 项目 > 用户);
+- **上下文压缩**:token 预算、三阶段规则压缩、溢出自愈、自动压缩;压缩写视图副本(主日志永不销毁),另有 LLM 语义摘要压缩(`/compact`,默认关);
+- **通用 hook 系统** + slash 命令(`/tools`、`/compact`、`/context`、`/memory` 等)+ 分层 TOML 配置(命令行 > 环境变量 > 项目 > 用户);
 - **多 provider**:OpenAI 兼容接口、智谱 GLM、mock 测试通道;
 - **MCP 客户端**:接入外部 MCP server,工具提示词自动生成调用说明;
-- **长期记忆**:frontmatter 格式、双上限、新鲜度管理、`/memory consolidate` 整理;
-- **多会话管理**:workspace 分组 + uuid 会话目录、会话自动命名、历史列表与切换恢复。
+- **长期记忆**:frontmatter 格式、双上限、新鲜度管理、`/memory consolidate` 整理。
 
 ## 快速开始
 
@@ -51,5 +50,9 @@ uv run my-agent-alpha -m deepseek/deepseek-chat -y "帮我看看这个项目"
 | 5 | 通用 hook 系统 / slash 命令框架 / 分层 TOML 配置 | ✅ |
 | 6 | 上下文压缩(token 预算、三阶段规则压缩、溢出自愈) | ✅ |
 | 8 | subagent / MCP / 长期记忆 | ✅ |
+| R1-R4 | 工具迭代:edit、todo(完成门控)、grep、会话自动命名 | ✅ |
+| M1-M4 | 长期记忆改造(frontmatter、双上限、consolidate) | ✅ |
+| V1-V5 | 压缩视图:主日志 + 视图副本双 Log、崩溃恢复、`/compact` | ✅ |
+| L1-L4 | LLM 语义压缩:摘要生成、分块预算、自动触发(默认关)、`/context` | ✅ |
 | 7 | HTTP Server(SSE)+ WebUI | ⏸ 暂缓 |
 | — | **长任务执行优化**:提升连续自主执行长任务的稳定性与效率 | ▶ 下一步 |
