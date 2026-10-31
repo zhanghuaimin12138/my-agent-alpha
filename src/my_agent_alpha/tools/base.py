@@ -230,7 +230,7 @@ class ToolUse:
     def execute(self) -> Iterator[Message]:
         """真正执行这次调用,逐条产出结果消息。
 
-        执行前先过确认链(见 confirm 模块):非只读工具都会被"审批"一次 ——
+        执行前先过确认链:非只读工具都会被"审批"一次 ——
         放行(confirm)才执行;拒绝(skip)产出一条带 DECLINED 标记的说明,
         不执行;改写(edit)则把主参数换成改写后的内容再执行。
 
