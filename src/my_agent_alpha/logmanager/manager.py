@@ -12,6 +12,11 @@ LogManager 的持久化设计,核心解决两个问题:
 读文件时,最后一行如果坏了(程序崩溃时只写了一半),跳过并告警;
 中间的行坏了则直接报错,因为那意味着日志被外力破坏,不能装作没看见。
 
+激活视图后的双写没有跨文件原子性(两个文件没法一步同时写完):
+写盘固定走"Master 先 → 视图 → active.json 检查点"三步,断电可能停在中间。
+恢复靠检查点 + 重启修复(_restore_active_view):Master 永远是事实来源,
+视图的多写裁掉、漏写从 Master 补齐,修完不重复、不遗漏。
+
 阶段 0 刻意省略(详见 docs/devlog/001):文件锁(多进程同时写)、事件日志(WAL)、
 视图/分支机制、附件存储。
 """
@@ -280,6 +285,9 @@ class LogManager:
         self._master_log = master_log
         self._active_view_log: Log | None = None  # 激活的视图 Log;None = 还没有视图
         self._active_view_id: str | None = None  # 激活视图的名字,如 "compacted-001"
+        # 双写只完成了一半时的失败原因;非 None 表示本实例已不可信,
+        # 继续追加可能重复或漏写,必须重新 load() 做确定性修复
+        self._write_failed: str | None = None
         self.logdir = logdir
 
     # ---- 读取口 ----
@@ -335,7 +343,8 @@ class LogManager:
         """打开一个会话;目录不存在时,只有 create=True 才允许新建。
 
         打开后还会看一眼 views/active.json:有合法的激活视图就连视图一起恢复
-        (模型继续读压缩后的历史);状态坏了或视图文件没了就打警告,回退读 Master。
+        (模型继续读压缩后的历史);上次双写崩在半路就先按检查点修复视图
+        (见 _restore_active_view);修不了(状态坏了/文件缺了)就打警告,回退读 Master。
 
         示例:
             manager = LogManager.load(日志根 / "2026-0929-a3f1c2")          # 恢复旧会话
@@ -354,19 +363,82 @@ class LogManager:
         return manager
 
     def _restore_active_view(self) -> None:
-        """按 views/active.json 恢复激活的视图;任何不对劲都回退 Master。
+        """按 views/active.json 恢复激活的视图;两边进度分叉时先做确定性修复。
 
-        回退只是"读取来源退回完整历史",不删除任何文件 —— 状态文件坏了
-        应当让人看见(告警),而不是顺手抹掉证据。
+        检查点(active.json 里的两个计数)是崩溃前最后一份"双方确实写到这了"
+        的凭证。磁盘比它多的部分可能是写了一半的残尾,统一按下述规则修平:
+
+        - 视图截到检查点确认的前 view_committed_count 条;
+        - 再把 Master 里检查点之后的消息(master_committed_count 起)原样接上。
+        这样无论崩在"Master 写完、视图没写"还是"视图写完、状态没更新",
+        修出来的视图都和 Master 尾部严格对齐,不重复、不遗漏。
+
+        以下情况修不了,告警并回退读 Master(只退读取来源,不删任何文件):
+        状态不可读、视图文件缺失、Master 比检查点还少(疑似被截断)、
+        视图比检查点还少(已确认的消息缺了)、修复时写盘失败。
         """
         state = read_active_state(self.logdir)
         if state is None or state.active_view is None:
             return  # 没激活过视图(或状态不可读):正常走 Master
+        assert state.active_view is not None  # read_active_state 已校验过,给类型检查看
         path = view_path(self.logdir, state.active_view)
         if not path.exists():
             logger.warning("激活视图文件不存在,回退主日志: %s", path)
             return
-        self._active_view_log = Log.read_jsonl(path)
+        master_len = len(self._master_log)
+        if master_len < state.master_committed_count:
+            logger.warning(
+                "主日志(%d 条)比检查点(%d 条)还少,疑似被截断,停用视图回退主日志: %s",
+                master_len,
+                state.master_committed_count,
+                path,
+            )
+            return
+        try:
+            view_log = Log.read_jsonl(path)
+        except ValueError as e:
+            logger.warning("激活视图中间行损坏(%s),回退主日志: %s", e, path)
+            return
+        if len(view_log) < state.view_committed_count:
+            logger.warning(
+                "视图(%d 条)比检查点(%d 条)少,已确认的消息缺失,回退主日志: %s",
+                len(view_log),
+                state.view_committed_count,
+                path,
+            )
+            return
+        if (
+            master_len == state.master_committed_count
+            and len(view_log) == state.view_committed_count
+        ):
+            # 磁盘与检查点完全一致:没有崩溃残留,直接激活,一个字节都不用写
+            self._active_view_log = view_log
+            self._active_view_id = state.active_view
+            return
+        # ---- 确定性修复:检查点确认的视图前缀 + Master 的检查点之后尾部 ----
+        repaired = list(view_log.messages[: state.view_committed_count])
+        repaired += self._master_log.messages[state.master_committed_count :]
+        logger.warning(
+            "检测到上次的写入只完成了一半(磁盘 %d 条 / 检查点 %d 条),按检查点修复视图为 %d 条",
+            len(view_log),
+            state.view_committed_count,
+            len(repaired),
+        )
+        try:
+            new_view_log = Log(repaired)
+            new_view_log.write_jsonl(path, sync=True)  # 全新 Log → 原子全量重写
+            write_active_state(
+                self.logdir,
+                ViewState(
+                    active_view=state.active_view,
+                    master_committed_count=master_len,
+                    view_committed_count=len(repaired),
+                ),
+            )
+        except OSError as e:
+            logger.warning("视图修复写盘失败(%s),保留原文件,回退主日志: %s", e, path)
+            return
+        self._active_view_log = new_view_log
         self._active_view_id = state.active_view
 
     # ---- 视图的创建与停用 ----
@@ -385,6 +457,7 @@ class LogManager:
         注意:传入的 messages 应当是"当前有效历史"压缩的结果(而不是每次
         重新压缩整个 Master),由调用方保证;本方法只负责存储与激活。
         """
+        self._check_writable()  # 双写崩过一半的实例,先恢复再压缩
         if not messages:
             raise ValueError("不允许创建空视图(那等于把历史清零)")
         # 1. Master 落盘
@@ -420,13 +493,64 @@ class LogManager:
     # ---- 追加与写盘 ----
 
     def append(self, msg: Message, *, sync: bool = False) -> None:
-        """追加一条消息并立即写盘。
+        """追加一条消息并立即写盘;激活了视图就双写(同一条消息进两份日志)。
 
-        sync=True 时额外强制刷盘,用于会话结束等关键时刻(平时不用)。
+        sync=True 时额外强制刷盘,用于会话结束等关键时刻(平时不用;
+        有视图时无论如何都强制刷盘,见 write 的说明)。
         """
-        self._master_log.append(msg)  # 追加内存
-        self.write(sync=sync)  # 持久化日志
+        self._check_writable()
+        self._master_log.append(msg)  # 追加内存(Master)
+        view_log = self._active_view_log
+        if view_log is not None:
+            view_log.append(msg)  # 同一个 Message 对象原样进视图内存
+        self.write(sync=sync)
 
     def write(self, *, sync: bool = False) -> None:
-        """把当前消息写盘(追加还是重写,Log 内部自己判断)。"""
-        self._master_log.write_jsonl(self.conversation_file, sync=sync)
+        """把当前消息写盘(追加还是重写,Log 内部自己判断)。
+
+        没有视图:只写 Master,行为与从前完全一样。
+        有视图:按固定顺序写三样东西,任何一步失败就冻结本实例 ——
+            1. Master 落盘(它是唯一的事实来源,永远先写);
+            2. 视图落盘;
+            3. active.json 检查点(记录双方此刻各写到第几条)。
+        为什么每步都强制刷盘(sync=True):检查点是"双方确实写到这了"的凭证,
+        若先让检查点落盘、消息还停在系统缓存里,断电后凭证反而会撒谎。
+        双写没有跨文件的原子性(两个文件没法一步同时写完),靠的正是
+        "Master 先行 + 检查点 + 重启修复"这套组合,修复见 _restore_active_view。
+        """
+        self._check_writable()
+        view_log = self._active_view_log
+        view_id = self._active_view_id
+        if view_log is None or view_id is None:
+            self._master_log.write_jsonl(self.conversation_file, sync=sync)
+            return
+        try:
+            self._master_log.write_jsonl(self.conversation_file, sync=True)
+            view_log.write_jsonl(view_path(self.logdir, view_id), sync=True)
+            write_active_state(
+                self.logdir,
+                ViewState(
+                    active_view=view_id,
+                    master_committed_count=len(self._master_log),
+                    view_committed_count=len(view_log),
+                ),
+            )
+        except OSError as e:
+            # 走到这里说明三步没走完:磁盘上两边进度已经分叉,内存也一样。
+            # 不许重试(重试会把 Master 里已成功的那条再写一遍),也不许
+            # 继续追加新消息 —— 冻结本实例,让调用方重新 load() 修复。
+            self._write_failed = f"{type(e).__name__}: {e}"
+            raise
+
+    def _check_writable(self) -> None:
+        """部分写入失败后,本实例已不可信:禁止继续常规追加。
+
+        抛 RuntimeError 提示恢复办法;重新 load() 会新建实例并按检查点
+        把磁盘上的分叉修平,那是唯一安全的继续方式。
+        """
+        if self._write_failed is not None:
+            raise RuntimeError(
+                f"上次写盘只完成了一部分({self._write_failed}),"
+                "继续追加可能造成消息重复或丢失;请重新 LogManager.load() "
+                "恢复后再继续。"
+            )
