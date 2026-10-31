@@ -240,6 +240,8 @@ def _stream_once(
     请求结束时把 token 用量作为生成器的返回值带回。
     max_output_tokens:可选的回复长度上限;不传(None)不向接口声明,
     所有旧调用行为不变。目前只有 LLM 压缩的摘要调用用它限制笔记长度。
+    流异常结束(接口从头到尾没给结束标记 finish_reason)时抛 RuntimeError:
+    半截回复当成完整回复存下来,比报错更难排查。
     """
     client = _make_client(cfg)
     create_kwargs: dict[str, Any] = {
@@ -272,6 +274,9 @@ def _stream_once(
         └── usage """
     usage: dict[str, int] | None = None
     in_think = False
+    # 接口的结束标记("stop"/"tool_calls"……):正常结束的流,最后一个带回答的
+    # chunk 上一定有它;整条流结束都没见到 → 中途被掐断了(见循环后的判断)
+    finish_reason: str | None = None
 
     # 原生调用分片的拼装处:index → 对应某一个调用，同一个调用的不同碎片，index相同
     # (id 和 name 只在第一片出现;arguments 是逐字符到达的,要拼)
@@ -283,7 +288,10 @@ def _stream_once(
             usage = _extract_usage(event.usage)  # 解析usage
         if not event.choices:  # 没有回答则continue
             continue
-        delta = event.choices[0].delta  # 拿到部分回答（增量）
+        choice = event.choices[0]
+        if getattr(choice, "finish_reason", None):
+            finish_reason = str(choice.finish_reason)  # 记下结束标记(只出现一次)
+        delta = choice.delta  # 拿到部分回答（增量）
         reasoning = getattr(
             delta, "reasoning_content", None
         )  # 尝试拿到思考过程（只有思考模型才有）
@@ -316,22 +324,43 @@ def _stream_once(
                 acc["args"] += fn.arguments
 
             # 检查一个调用是否拼装完成(大括号配对 + 能解析)就立刻产出调用行,
+            # 参数末尾可能带空白(有的服务商发格式化过的多行 JSON):
+            # 先去尾再判断,不然"大括号闭了但后面跟个空格"就永远凑不齐
+            args_probe = acc["args"].rstrip()
             args_ready = (
                 acc["name"]
                 and not acc["done"]  # 还没yield
-                and acc["args"].startswith("{")  # 参数是个 JSON 对象
-                and find_json_end(acc["args"], 0) == len(acc["args"])  # 大括号恰好闭合到末尾
+                and args_probe.startswith("{")  # 参数是个 JSON 对象
+                and find_json_end(args_probe, 0) == len(args_probe)  # 大括号恰好闭合到末尾
             )
             if args_ready:
                 try:
-                    json.loads(acc["args"])  # json解析，出错就丢
+                    json.loads(args_probe)  # json解析，出错就丢
                 except json.JSONDecodeError:
                     continue
-                yield f"@{acc['name']}({acc['id']}): {acc['args']}\n"  # yield工具调用：str()
+                # 工具调用是"正式动作",不属于思考:think 还开着就必须先关掉再产出调用行
+                # (2026-11-01 踩坑:glm 思考模型"思考完直接发调用、全程没有正文",
+                #  调用行被包进 <think> 里;解析器按规矩把 think 里的调用当草稿扔掉,
+                #  结果工具一次都没执行,模型下一轮还以为结果丢了)
+                if in_think:
+                    yield "</think>"
+                    in_think = False
+                yield f"@{acc['name']}({acc['id']}): {args_probe}\n"  # yield工具调用：str()
                 acc["done"] = "1"
 
     if in_think:
         yield "</think>"
+        in_think = False
+    # 收尾兜底:拼了一半但从未"恰好闭合"的调用(最典型:无参数工具,arguments
+    # 全程是空串)在这里补产出 —— 不补就是静默丢一次工具调用,模型和用户都看不出来
+    for acc in tool_acc.values():
+        if acc["name"] and not acc["done"]:
+            args = acc["args"].strip() or "{}"  # 没有参数就按空对象 {} 补
+            yield f"@{acc['name']}({acc['id']}): {args}\n"
+    # 正常结束的流一定带结束标记;没有 → 中途被掐断(断网/服务端异常),
+    # 宁可报错也不把半截回复当成完整回复存下来(仿 gptme llm_openai.py 的做法)
+    if finish_reason is None:
+        raise RuntimeError("流式回复异常结束:接口没返回结束标记(finish_reason),内容可能不完整")
     return usage
 
 

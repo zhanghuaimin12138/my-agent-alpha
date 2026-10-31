@@ -144,23 +144,67 @@ def test_interrupt_midstream_stops_turn(logdir: Path, workspace: Path) -> None:
 # ---- reasoning_content → <think> 包装(openai_compat._stream_once) ----
 
 
-def _fake_stream_events() -> Any:
-    def delta(reasoning: str | None = None, content: str | None = None) -> Any:
-        return SimpleNamespace(
-            usage=None,
-            choices=[
-                SimpleNamespace(delta=SimpleNamespace(reasoning_content=reasoning, content=content))
-            ],
-        )
+def _chunk(
+    reasoning: str | None = None,
+    content: str | None = None,
+    tool_calls: list[Any] | None = None,
+    finish_reason: str | None = None,
+) -> Any:
+    """造一个假的流式 chunk:choices[0] 里放一个增量(delta)。
 
+    字段和真实接口一致:reasoning 是思考片段,content 是正文片段,
+    tool_calls 是原生调用分片,finish_reason 是结束标记(只在最后一个
+    带回答的 chunk 上出现一次)。
+    """
+    return SimpleNamespace(
+        usage=None,
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    reasoning_content=reasoning, content=content, tool_calls=tool_calls
+                ),
+                finish_reason=finish_reason,
+            )
+        ],
+    )
+
+
+def _tc_frag(
+    index: int = 0, call_id: str | None = None, name: str | None = None, arguments: str = ""
+) -> Any:
+    """造一段原生工具调用的分片:编号和名字只在第一段出现,参数是逐段挤过来的。"""
+    return SimpleNamespace(
+        index=index, id=call_id, function=SimpleNamespace(name=name, arguments=arguments)
+    )
+
+
+def _usage_chunk(inp: int = 7, out: int = 3) -> Any:
+    """造流末尾那个只带用量信息、没有回答内容的 chunk。"""
+    return SimpleNamespace(
+        usage=SimpleNamespace(prompt_tokens=inp, completion_tokens=out), choices=[]
+    )
+
+
+def _patch_stream(monkeypatch: pytest.MonkeyPatch, events: Any) -> None:
+    """把 _make_client 换成假货:create() 直接返回预制的假事件迭代器。"""
+    from my_agent_alpha.llm import openai_compat
+
+    monkeypatch.setattr(
+        openai_compat,
+        "_make_client",
+        lambda cfg: SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: events))
+        ),
+    )
+
+
+def _fake_stream_events() -> Any:
     return iter(
         [
-            delta(reasoning="推理A"),
-            delta(reasoning="推理B"),
-            delta(content="正文"),
-            SimpleNamespace(
-                usage=SimpleNamespace(prompt_tokens=7, completion_tokens=3), choices=[]
-            ),
+            _chunk(reasoning="推理A"),
+            _chunk(reasoning="推理B"),
+            _chunk(content="正文", finish_reason="stop"),
+            _usage_chunk(),
         ]
     )
 
@@ -192,6 +236,118 @@ def test_reasoning_wrapped_into_think(monkeypatch: pytest.MonkeyPatch) -> None:
     except StopIteration as e:
         usage = e.value
     assert usage == {"input": 7, "output": 3}
+
+
+# ---- 原生调用分片:think 收口 / 空参兜底 / 截断报错(2026-11-01 glm 踩坑回归) ----
+
+
+def test_tool_call_line_lands_outside_think(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回归:思考模型"思考完直接发原生调用、全程无正文"时,调用行必须落在 </think> 之后。
+
+    修复前:think 一直开着,调用行被包进 <think> 里,解析器按规矩把 think
+    里的调用当草稿扔掉 → 工具一次都没执行(glm-5.3 真机踩坑)。
+    """
+    from my_agent_alpha.llm import models as models_mod
+    from my_agent_alpha.llm import openai_compat
+
+    _patch_stream(
+        monkeypatch,
+        iter(
+            [
+                _chunk(reasoning="先读需求"),
+                _chunk(tool_calls=[_tc_frag(call_id="call_1", name="read", arguments='{"pa')]),
+                _chunk(
+                    tool_calls=[_tc_frag(arguments='th": "a.txt"}')],
+                    finish_reason="tool_calls",
+                ),
+                _usage_chunk(),
+            ]
+        ),
+    )
+    meta = models_mod.ModelMeta("deepseek", "x")
+    cfg = models_mod.PROVIDERS["deepseek"]
+    text = "".join(openai_compat.stream([], meta, cfg))
+    # 调用行在 think 关闭之后,参数完整可解析
+    assert text == '<think>先读需求</think>@read(call_1): {"path": "a.txt"}\n'
+
+
+def test_tool_call_with_empty_args_flushed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """无参数工具(arguments 全程是空串,永远等不到"大括号闭合"):
+    流结束时兜底补出调用行,而不是静默丢掉这次调用。"""
+    from my_agent_alpha.llm import models as models_mod
+    from my_agent_alpha.llm import openai_compat
+
+    _patch_stream(
+        monkeypatch,
+        iter(
+            [
+                _chunk(
+                    tool_calls=[_tc_frag(call_id="call_9", name="todo")],
+                    finish_reason="tool_calls",
+                ),
+                _usage_chunk(),
+            ]
+        ),
+    )
+    meta = models_mod.ModelMeta("deepseek", "x")
+    cfg = models_mod.PROVIDERS["deepseek"]
+    text = "".join(openai_compat.stream([], meta, cfg))
+    assert text == "@todo(call_9): {}\n"
+
+
+def test_tool_call_multiline_args_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """参数是格式化过的多行 JSON(内部带换行和空格,末尾还有个换行):
+    去掉尾部空白后照样能凑齐调用行。"""
+    from my_agent_alpha.llm import models as models_mod
+    from my_agent_alpha.llm import openai_compat
+
+    _patch_stream(
+        monkeypatch,
+        iter(
+            [
+                _chunk(tool_calls=[_tc_frag(call_id="call_1", name="read", arguments="{")]),
+                _chunk(tool_calls=[_tc_frag(arguments='\n  "path":')]),
+                _chunk(tool_calls=[_tc_frag(arguments=' "a.txt"\n')]),
+                _chunk(tool_calls=[_tc_frag(arguments="}\n")], finish_reason="tool_calls"),
+                _usage_chunk(),
+            ]
+        ),
+    )
+    meta = models_mod.ModelMeta("deepseek", "x")
+    cfg = models_mod.PROVIDERS["deepseek"]
+    text = "".join(openai_compat.stream([], meta, cfg))
+    assert text == '@read(call_1): {\n  "path": "a.txt"\n}\n'
+
+
+def test_stream_without_finish_reason_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """流结束了但接口从头到尾没给结束标记 → 视为中途被掐断:
+    报错,不把半截回复冒充成完整回复存下来。"""
+    from my_agent_alpha.llm import models as models_mod
+    from my_agent_alpha.llm import openai_compat
+
+    _patch_stream(monkeypatch, iter([_chunk(content="写了一半")]))
+    meta = models_mod.ModelMeta("deepseek", "x")
+    cfg = models_mod.PROVIDERS["deepseek"]
+    with pytest.raises(RuntimeError, match="finish_reason"):
+        list(openai_compat.stream([], meta, cfg))
+
+
+def test_drain_error_after_break_does_not_kill_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """断点触发后读尾巴(为了拿用量)时断流:完整的调用已经到手,
+    尾巴上的报错不该打死整个回合,回复照常返回。"""
+
+    def events() -> Any:
+        yield _chunk(content="```shell\necho drain-ok\n```\n\n")
+        yield _chunk(content="多余的尾巴")  # 断点在这之前就该触发,这段被丢弃
+        raise RuntimeError("断点后断流")
+
+    _patch_stream(monkeypatch, events())
+    from my_agent_alpha.tools import get_tools
+
+    get_tools()  # 注册真实工具,断点检测才认得 ```shell 围栏
+    msg = reply([Message("user", "x")], "deepseek/deepseek-chat")
+    assert "echo drain-ok" in msg.content
+    assert "多余的尾巴" not in msg.content  # 断点后断流,尾巴没进来
 
 
 # ---- 重试策略 ----

@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from collections.abc import Callable, Iterator, Sequence
 
@@ -160,12 +161,13 @@ def reply(
         pass  # 正常结束:用量信息已被包装器存好
 
     if broke:
-        # 把剩余的生成内容读完(内容直接丢弃，但是生成内容的结尾有usage，需要拿到)
-        try:
+        # 把剩余的生成内容读完(内容直接丢弃,但生成内容的结尾有 usage,要拿到)。
+        # 尾巴上断流/被截断不算大事:完整的工具调用已经到手,不能被尾巴的
+        # 报错打死整个回合(代价最多是丢一条用量记录)——
+        # 所以这里除了正常结束(StopIteration),其它异常也一并吞掉
+        with contextlib.suppress(Exception):
             while True:
                 next(wrapped)  # 在Generator的最后拿到返回值usage
-        except StopIteration:
-            pass
 
     text = "".join(parts)  # 攒起来的内容放进content（text）里
     if interrupted:
