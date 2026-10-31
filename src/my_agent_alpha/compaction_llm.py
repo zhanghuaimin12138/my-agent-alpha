@@ -1,11 +1,11 @@
-"""LLM 语义压缩的纯函数层:切分、指纹、提示词、验货、组装。
+"""LLM 语义压缩:纯函数零件 + 服务层(手动/自动压缩共用的编排)。
 
 和规则压缩(compaction.py)的分工:规则压缩机械地删低价值字节(思考块、
 超长输出);本模块让模型把旧历史写成一份"工作笔记"(Checkpoint),
 用笔记替换旧历史 —— 对话里全是干货、规则压不动时,这条路才有意义。
 
-本文件全是纯计算:不调用模型、不写磁盘、不改任何现有行为。
-调用模型与创建视图的编排(服务层)在后续步骤接入。
+上半部分是纯计算(不调模型、不写磁盘);最下面的 compact_current_with_llm
+是服务层:串起五个零件、调一次模型、比对指纹、复用视图存储层激活。
 
 五个零件(按一次压缩的数据流向):
 
@@ -23,13 +23,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
-from my_agent_alpha.compaction import tool_groups
+from my_agent_alpha.codeblock import strip_think
+from my_agent_alpha.compaction import tool_groups, validate_compacted_messages
+from my_agent_alpha.llm import reply
+from my_agent_alpha.llm.models import resolve_model
 from my_agent_alpha.message import Message
 from my_agent_alpha.tools.base import ToolUse
-from my_agent_alpha.utils import len_tokens
+from my_agent_alpha.utils import get_context_budget, len_tokens
+
+if TYPE_CHECKING:  # 只做类型标注,不反向依赖日志管理(避免循环导入)
+    from my_agent_alpha.logmanager import LogManager
+
+logger = logging.getLogger(__name__)
 
 # Checkpoint 消息正文的开头记号(给人看;程序识别走 metadata)
 CHECKPOINT_PREFIX = "[LLM Compaction Checkpoint]"
@@ -223,9 +234,9 @@ def validate_summary(summary: str, *, max_tokens: int) -> None:
 
 
 def assemble_semantic_view(
-    source: Sequence[Message], # 源上下文
-    summary: str, # 总结后的一条消息
-    recent_tail: Sequence[Message], # 保留的尾部
+    source: Sequence[Message],  # 源上下文
+    summary: str,  # 总结后的一条消息
+    recent_tail: Sequence[Message],  # 保留的尾部
     *,
     source_view: str | None,
     source_digest: str,
@@ -241,11 +252,11 @@ def assemble_semantic_view(
       人看的版本存在 views/summaries/*.md)。
     """
     old_checkpoint = find_checkpoint(source)
-    tail_ids = {id(m) for m in recent_tail} # 尾部
-    preserved = [# 头pinnd
+    tail_ids = {id(m) for m in recent_tail}  # 尾部
+    preserved = [  # 头pinnd
         m for m in source if m.pinned and id(m) not in tail_ids and m is not old_checkpoint
     ]
-    checkpoint = Message( # 一条摘要
+    checkpoint = Message(  # 一条摘要
         "system",
         f"{CHECKPOINT_PREFIX}\n\n{summary.strip()}",
         pinned=True,
@@ -262,3 +273,138 @@ def assemble_semantic_view(
         },
     )
     return [*preserved, checkpoint, *list(recent_tail)]
+
+
+# ---------------- 服务层:把零件串起来(步骤 2 接入)----------------
+
+
+@dataclass(frozen=True)
+class LLMSummaryResult:
+    """一次 LLM 压缩的结果(给命令/Hook 显示用,不承载消息本体)。
+
+    status 的四种值:
+    - success:已生成并激活新视图,view_id 有值;
+    - skipped:不值得压(历史太短/没有可总结的前缀/收益不足),现状保持;
+    - stale:模型写笔记期间历史变了,这次结果作废(防止漏掉新消息);
+    - failed:模型调用抛错(网络/超时等),reason 记了原因。
+    另有一类"笔记不合格/安检不过"走 ValueError 抛出(调用方捕获),
+    和 failed 分开:那不是故障,是模型交的货不行,重试未必能好。
+    """
+
+    status: Literal["success", "skipped", "stale", "failed"]
+    view_id: str | None = None
+    reason: str | None = None
+    tokens_before: int = 0
+    tokens_after: int | None = None
+
+
+def _save_summary_markdown(logdir: Path, view_id: str, summary: str) -> None:
+    """把笔记另存一份人能看的 Markdown(views/summaries/<视图名>.md)。
+
+    每个视图配独立文件(而不是反复覆盖一份总笔记),事后审计能对上号。
+    写失败只打警告:它只是给人看的副本,写不进去不许影响压缩本身
+    (真实历史在主日志和视图 JSONL 里,一份都不少)。
+    """
+    path = logdir / "views" / "summaries" / f"{view_id}.md"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(summary.strip() + "\n", encoding="utf-8")
+    except OSError as e:
+        logger.warning("笔记存档写失败(不影响压缩结果,%s): %s", path, e)
+
+
+def compact_current_with_llm(
+    manager: LogManager,
+    *,
+    model: str,
+    config: LLMCompactionConfig | None = None,
+) -> LLMSummaryResult:
+    """用模型把"当前有效历史"总结成新视图;一切失败都保持现状。
+
+    这是手动 /compact summarize 与(将来的)自动触发共用的服务函数。
+    流程:快照指纹 → 切分 → 调模型写笔记(不带工具、不执行任何东西、
+    这次调用本身不进对话日志)→ 验货 → 组装 → 过现有安检 → 收益检查
+    → 再比对指纹(没变才提交)→ 复用 create_compacted_view 激活 → 存档笔记。
+
+    两种异常语义(都向上抛,由命令/Hook 决定怎么呈现):
+    - ValueError:笔记不合格或组装结果没过安检 —— 现状保持,重试未必有用;
+    - 其他异常:模型调用本身的故障(网络等),已包成 failed 结果返回。
+    """
+    cfg = config or LLMCompactionConfig()
+    source = list(manager.messages)
+    tokens_before = len_tokens(source)
+    source_digest = digest_messages(source)
+    source_view = manager.current_view
+
+    # 尾部预算:配置上限与"模型窗口的四分之一"取小 —— 小窗口模型
+    # 死守 8k 尾部会把笔记挤得没地方
+    budget = get_context_budget(resolve_model(model).context)
+    recent = min(cfg.keep_recent_tokens, budget // 4)
+    prefix, tail = split_for_semantic_compaction(source, recent)
+    if not prefix:
+        return LLMSummaryResult(
+            status="skipped",
+            reason="没有可总结的旧历史(全在原样保留的尾部里)",
+            tokens_before=tokens_before,
+        )
+
+    try:
+        response = reply(
+            build_summary_request(prefix),
+            model,
+            tools=(),  # 记录员没有工具:笔记里写了命令也只是文字
+            tool_format="markdown",
+            break_on_tooluse=False,  # 笔记里出现代码块不许打断接收
+            max_output_tokens=cfg.summary_max_output_tokens,
+        )
+    except Exception as e:  # 模型层故障:网络/超时/超窗等,如实上报
+        return LLMSummaryResult(
+            status="failed",
+            reason=f"{type(e).__name__}: {e}",
+            tokens_before=tokens_before,
+        )
+
+    # 剥掉模型可能自带的思考区,再验货(缺章节/超长/伪造调用行都拒收)
+    summary = strip_think(response.content).strip()
+    validate_summary(summary, max_tokens=cfg.summary_max_output_tokens)
+
+    new_messages = assemble_semantic_view(
+        source,
+        summary,
+        tail,
+        source_view=source_view,
+        source_digest=source_digest,
+        summary_model=model,
+    )
+    # 组装结果必须过现有安检(pinned 在/最新 user 在/调用配对完整)
+    validate_compacted_messages(source, new_messages)
+
+    tokens_after = len_tokens(new_messages)
+    if tokens_after > tokens_before * (1 - cfg.min_savings_ratio):
+        return LLMSummaryResult(
+            status="skipped",
+            reason=(
+                f"压缩收益不足(约省 {(1 - tokens_after / tokens_before) * 100:.0f}%,"
+                f"门槛 {cfg.min_savings_ratio * 100:.0f}%),不值得请模型"
+            ),
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+        )
+
+    # 提交前再比对一次指纹:模型写笔记花了时间,期间历史要是变了,
+    # 这次结果基于旧快照,激活它会漏掉新消息 —— 作废,让调用方重试
+    if digest_messages(manager.messages) != source_digest:
+        return LLMSummaryResult(
+            status="stale",
+            reason="摘要期间会话历史发生了变化,本次结果作废(可重试)",
+            tokens_before=tokens_before,
+        )
+
+    view_id = manager.create_compacted_view(new_messages)
+    _save_summary_markdown(manager.logdir, view_id, summary)
+    return LLMSummaryResult(
+        status="success",
+        view_id=view_id,
+        tokens_before=tokens_before,
+        tokens_after=tokens_after,
+    )

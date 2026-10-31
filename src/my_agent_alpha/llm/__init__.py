@@ -104,6 +104,9 @@ def reply(
     break_on_tooluse: bool = True,
     tools: Sequence[ToolSpec] = (),
     tool_format: str = "markdown",
+    # 可选的回复长度上限(接口的 max_tokens);不传就一切照旧。
+    # 目前只有 LLM 压缩的摘要调用用它限制笔记长度
+    max_output_tokens: int | None = None,
 ) -> Message:
     """把对话发给模型,等它生成完,返回一条 assistant 消息。
 
@@ -126,7 +129,7 @@ def reply(
         raw: Iterator[str] = mock_stream(messages, meta.model)
     else:
         cfg = PROVIDERS.get(meta.provider) or _custom_cfg(meta.provider)
-        raw = openai_stream(messages, meta, cfg, tools if use_native else ())
+        raw = openai_stream(messages, meta, cfg, tools if use_native else (), max_output_tokens)
 
     # 消费循环
     # 解析拿到的chunk(raw)

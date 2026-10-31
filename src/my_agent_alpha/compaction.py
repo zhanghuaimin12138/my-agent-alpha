@@ -308,8 +308,19 @@ def prepare_messages(
 # 一次成功的规则压缩"固化"成持久化视图。两者的区别见开发方案 §5.1。
 
 
+def _is_llm_checkpoint(msg: Message) -> bool:
+    """判断一条消息是不是 LLM 压缩笔记(靠 metadata 里的固定记号)。
+
+    只在安检里用:笔记虽是 pinned system,但它本来就是压缩产物,
+    下次压缩被新笔记替换是设计行为,不该按"丢了 pinned 提示词"拒绝。
+    (判断逻辑内联在本模块,避免 compaction ↔ compaction_llm 循环导入。)
+    """
+    compaction_meta = (msg.metadata or {}).get("compaction")
+    return isinstance(compaction_meta, dict) and compaction_meta.get("kind") == "llm_checkpoint"
+
+
 def validate_compacted_messages(source: Sequence[Message], compacted: Sequence[Message]) -> None:
-    """激活视图前的校验:检查不通过就抛 ValueError,拒绝激活。
+    """激活视图前的校验:传入压缩后的msgs,判断是否是合格的压缩后产物，检查不通过就抛 ValueError,拒绝激活。
 
     检查四件事(见开发方案 §5.2.5):
     1. pinned 的系统提示词一条不少(它们是模型的身份/工具说明,丢了模型就失忆);
@@ -321,9 +332,17 @@ def validate_compacted_messages(source: Sequence[Message], compacted: Sequence[M
     匹配用对象同一性(is)而不是 Message 相等:pinned 提示词和最新 user
     消息不会被压缩阶段改动,原对象必须原样出现在结果里;相等性只比较
     role/content,两条不同消息内容撞车时会误判"还在"。
+    一个精确的例外:LLM 压缩笔记(metadata 里 compaction.kind =
+    "llm_checkpoint"的消息)虽然是 pinned system,但它本来就是压缩产物,
+    下一次压缩时被新笔记替换是设计行为,不在"不可丢"之列。
     """
     for m in source:
-        if m.pinned and m.role == "system" and not any(m is c for c in compacted):
+        if (
+            m.pinned
+            and m.role == "system"
+            and not _is_llm_checkpoint(m)
+            and not any(m is c for c in compacted)
+        ):
             raise ValueError(f"压缩丢了 pinned 系统提示词:{m.content[:50]}…")
     last_user = None
     for m in source:

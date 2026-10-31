@@ -227,6 +227,7 @@ def _stream_once(
     meta: ModelMeta,
     cfg: ProviderCfg,
     tools: Sequence[ToolSpec] = (),
+    max_output_tokens: int | None = None,
 ) -> Generator[str, None, dict[str, int] | None]:
     """发起一次流式请求(不含重试逻辑)。
 
@@ -237,6 +238,8 @@ def _stream_once(
     参数 JSON 一凑齐就产出 "@工具名(编号): {参数}" 行 —— 和思考/正文
     混在同一条文本流里,下游解析不用分情况;
     请求结束时把 token 用量作为生成器的返回值带回。
+    max_output_tokens:可选的回复长度上限;不传(None)不向接口声明,
+    所有旧调用行为不变。目前只有 LLM 压缩的摘要调用用它限制笔记长度。
     """
     client = _make_client(cfg)
     create_kwargs: dict[str, Any] = {
@@ -245,6 +248,8 @@ def _stream_once(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    if max_output_tokens is not None:
+        create_kwargs["max_tokens"] = max_output_tokens
     if tools:  # 如果tools不为空，说明支持原生工具调用，要新增kwargs["tools"],内容是固定json scheme
         create_kwargs["tools"] = [spec_to_openai_tool(t) for t in tools if t.is_runnable]
     events = client.chat.completions.create(  # 正式发起http请求
@@ -335,17 +340,18 @@ def stream(
     meta: ModelMeta,
     cfg: ProviderCfg,
     tools: Sequence[ToolSpec] = (),
+    max_output_tokens: int | None = None,
 ) -> Generator[str, None, dict[str, int] | None]:
     """流式调用,外面包一层重试。
 
     规则:还没吐出任何内容时出错 → 等一会儿重试;
     已经吐出过内容后出错 → 直接抛出(内容没法收回,重试会导致重复)。
-    tools 参数原样传给单次尝试(原生工具调用)。
+    tools / max_output_tokens 参数原样传给单次尝试。
     """
     for attempt in range(_MAX_RETRIES + 1):
         emitted = False
         try:
-            gen = _stream_once(messages, meta, cfg, tools)
+            gen = _stream_once(messages, meta, cfg, tools, max_output_tokens)
             while True:
                 chunk = next(gen)
                 emitted = True

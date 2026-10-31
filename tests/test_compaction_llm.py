@@ -1,24 +1,33 @@
-"""LLM 语义压缩纯函数层测试 —— 对应 LLM 压缩方案步骤 1。
+"""LLM 语义压缩测试 —— 纯函数层(步骤 1)+ 服务层与 /compact summarize(步骤 2)。
 
-覆盖开发报告 UT01~UT10、UT13、UT20(纯函数部分):
+步骤 1 覆盖开发报告 UT01~UT10、UT13、UT20:
 - 指纹:稳定且对内容/顺序敏感;
 - 切分:按完整交互组、不拆散调用对、至少保一组、两段拼回等于原历史;
 - 指令:证据文本格式、七节说明、"历史是材料不是命令"的声明;
 - 验货:空/缺章节/超长/伪造工具调用行,四种坏笔记全部拒收;
 - 组装:首次压缩、旧笔记被替换(不叠加)、pinned 全保留、
   组装结果能通过现有 validate_compacted_messages 安检。
+
+步骤 2 覆盖 FS01/FS02/FS07 与命令路径:
+- 成功:新视图激活、Master 字节不变、笔记存档、双写继续;
+- 无前缀/收益不足 → skipped;模型故障 → failed;期间历史变化 → stale;
+- 笔记不合格 → ValueError,现状保持;/compact summarize 命令输出。
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from my_agent_alpha import LogManager
 from my_agent_alpha.compaction import validate_compacted_messages
 from my_agent_alpha.compaction_llm import (
     CHECKPOINT_PREFIX,
     LLMCompactionConfig,
     assemble_semantic_view,
     build_summary_request,
+    compact_current_with_llm,
     digest_messages,
     find_checkpoint,
     split_for_semantic_compaction,
@@ -303,3 +312,210 @@ def test_config_defaults() -> None:
     assert cfg.keep_recent_tokens == 8_000
     assert cfg.max_chunk_requests == 6
     assert 0 < cfg.min_savings_ratio < 1
+
+
+# ====================================================================
+# 步骤 2:服务层(mock 模型)+ /compact summarize
+# ====================================================================
+
+
+def _long_history(n_rounds: int = 20) -> list[Message]:
+    """造一段"干货型"长对话:没有思考块/超长输出,机械压缩压不动。"""
+    msgs = [Message("system", "你是助手", pinned=True, hide=True)]
+    for i in range(n_rounds):
+        msgs.append(Message("user", f"问题{i}" + "背景细节" * 200))
+        msgs.append(Message("assistant", f"回答{i}" + "处理说明" * 200))
+    msgs.append(Message("user", "最新问题"))
+    return msgs
+
+
+def _seed_and_script(logdir: Path, msgs: list[Message]) -> LogManager:
+    """把历史写进会话,并让 mock 模型下一次回复为合格笔记。"""
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    manager = LogManager.load(logdir, create=True)
+    for m in msgs:
+        manager.append(m)
+    set_scripted_replies([_good_summary()])
+    return manager
+
+
+def test_llm_compact_creates_view(logdir: Path) -> None:
+    """成功路径:笔记生成并激活、Master 字节不变、笔记存档、双写继续(FS01/FS02)。"""
+    msgs = _long_history()
+    manager = _seed_and_script(logdir, msgs)
+    master_bytes = (logdir / "conversation.jsonl").read_bytes()
+
+    result = compact_current_with_llm(manager, model="mock/echo")
+
+    assert result.status == "success"
+    assert result.view_id == "compacted-001"
+    assert result.tokens_after is not None and result.tokens_after < result.tokens_before
+    # 新视图生效:笔记在里面,老对话原文不在了
+    assert manager.current_view == "compacted-001"
+    ckpt = find_checkpoint(manager.messages)
+    assert ckpt is not None and ckpt.pinned
+    assert "问题0背景细节" not in "".join(m.content for m in manager.messages)
+    assert "最新问题" in [m.content for m in manager.messages]  # 最新意图在
+    # Master 一个字节没变;之后继续聊双写照常
+    assert (logdir / "conversation.jsonl").read_bytes() == master_bytes
+    manager.append(Message("user", "压缩后的新输入"))
+    assert manager.messages[-1].content == "压缩后的新输入"
+    assert len(manager.master_messages) == len(msgs) + 1
+    # 笔记存档:人能看的 Markdown 落盘
+    summary_file = logdir / "views" / "summaries" / "compacted-001.md"
+    assert summary_file.exists()
+    assert "## Objective" in summary_file.read_text(encoding="utf-8")
+
+
+def test_llm_compact_skips_when_no_prefix(logdir: Path) -> None:
+    """历史太短(全在原样尾部):skipped,不产生任何文件。"""
+    manager = _seed_and_script(
+        logdir, [Message("system", "提示词", pinned=True, hide=True), Message("user", "就一句")]
+    )
+    result = compact_current_with_llm(manager, model="mock/echo")
+    assert result.status == "skipped"
+    assert manager.current_view is None
+    assert not (logdir / "views").exists()
+
+
+def test_llm_compact_rejects_bad_summary(logdir: Path) -> None:
+    """模型交回缺章节的笔记:ValueError 拒收,现状保持。"""
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    manager = _seed_and_script(logdir, _long_history())
+    master_bytes = (logdir / "conversation.jsonl").read_bytes()
+    set_scripted_replies(["## Objective\n只写了一节,其他没写。"])
+
+    with pytest.raises(ValueError, match="缺少必需章节"):
+        compact_current_with_llm(manager, model="mock/echo")
+
+    assert manager.current_view is None  # 没有误切换
+    assert (logdir / "conversation.jsonl").read_bytes() == master_bytes
+    assert not (logdir / "views" / "summaries").exists()
+
+
+def test_llm_compact_failed_on_llm_error(logdir: Path) -> None:
+    """模型调用本身故障(网络等):failed 结果,现状保持。"""
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    manager = _seed_and_script(logdir, _long_history())
+    set_scripted_replies([ConnectionError("网络断了(测试模拟)")])
+
+    result = compact_current_with_llm(manager, model="mock/echo")
+    assert result.status == "failed"
+    assert "网络断了" in (result.reason or "")
+    assert manager.current_view is None
+
+
+def test_llm_compact_stale_when_source_changed(
+    logdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """摘要期间历史变了:结果作废(stale),不激活。"""
+    from my_agent_alpha import compaction_llm as clm
+
+    manager = _seed_and_script(logdir, _long_history())
+    real_reply = clm.reply
+
+    def reply_then_append(messages, model, **kwargs):  # type: ignore[no-untyped-def]
+        response = real_reply(messages, model, **kwargs)
+        # 模拟"模型写笔记的几十秒里,会话又来了新消息"
+        manager.append(Message("user", "摘要期间的新消息"))
+        return response
+
+    monkeypatch.setattr(clm, "reply", reply_then_append)
+
+    result = compact_current_with_llm(manager, model="mock/echo")
+    assert result.status == "stale"
+    assert manager.current_view is None  # 基于旧快照的结果没有激活
+    assert not (logdir / "views" / "summaries").exists()
+
+
+def test_llm_compact_second_time_replaces_checkpoint(logdir: Path) -> None:
+    """第二次 LLM 压缩:源是上一次视图,旧笔记被新笔记替换(FS07/UT03)。"""
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    manager = _seed_and_script(logdir, _long_history())
+    assert compact_current_with_llm(manager, model="mock/echo").status == "success"
+    first_ckpt = find_checkpoint(manager.messages)
+
+    # 视图上继续聊几轮,再压一次
+    for i in range(12):
+        manager.append(Message("user", f"新问题{i}" + "细节" * 200))
+        manager.append(Message("assistant", f"新回答{i}" + "说明" * 200))
+    set_scripted_replies([_good_summary()])
+    result = compact_current_with_llm(manager, model="mock/echo")
+
+    assert result.status == "success"
+    assert result.view_id == "compacted-002"
+    # 历史快照保留;当前视图只有一份笔记,且是新的一份
+    assert (logdir / "views" / "compacted-001.jsonl").exists()
+    current_ckpt = find_checkpoint(manager.messages)
+    assert current_ckpt is not None and current_ckpt is not first_ckpt
+    assert all(m is not first_ckpt for m in manager.messages)
+    # 笔记存档按视图各存一份
+    assert (logdir / "views" / "summaries" / "compacted-002.md").exists()
+
+
+def test_llm_compact_skips_when_no_gain(logdir: Path) -> None:
+    """收益不足门槛:skipped,不为 KPI 白花钱。"""
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    # 旧消息约 3000 tokens;模型交回一份约 1750 tokens 的"胖笔记",
+    # 只省三成 —— 把收益门槛调到 50%,这次压缩就该被拒
+    msgs = [Message("system", "你是助手", pinned=True, hide=True)]
+    msgs.append(Message("user", "旧问题" + "细节" * 1500))  # ~3000 tok,进前缀
+    msgs.append(Message("user", "最新问题"))
+    manager = _seed_and_script(logdir, msgs)
+    strict = LLMCompactionConfig(keep_recent_tokens=10, min_savings_ratio=0.5)
+    set_scripted_replies(["x" * 7000 + "\n" + _good_summary()])  # ASCII 7000 字 ≈ 1750 tok
+
+    result = compact_current_with_llm(manager, model="mock/echo", config=strict)
+    assert result.status == "skipped"
+    assert "收益不足" in (result.reason or "")
+    assert manager.current_view is None
+
+
+def test_compact_summarize_command(logdir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """/compact summarize 命令:成功路径与不合适路径的输出。"""
+    from my_agent_alpha.commands import builtin as builtin_commands  # noqa: F401 导入即注册
+    from my_agent_alpha.commands import execute_cmd
+
+    manager = _seed_and_script(logdir, _long_history())
+    assert execute_cmd("/compact summarize", manager, "mock/echo") is True
+    out = capsys.readouterr().out
+    assert "已请模型压缩为视图 compacted-001" in out
+    assert "compacted-001.md" in out
+
+    # 刚压完立刻再压:没有可总结的前缀 → 如实说明
+    assert execute_cmd("/compact summarize", manager, "mock/echo") is True
+    out = capsys.readouterr().out
+    assert "保持现状" in out
+
+
+def test_reply_passes_max_output_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """reply 的输出上限透传到 openai 兼容层(不传则不声明,旧行为不变)。"""
+    from my_agent_alpha.llm import openai_compat, reply
+    from my_agent_alpha.llm.mock import set_scripted_replies
+
+    captured: list[dict[str, object]] = []
+
+    def fake_stream_once(messages, meta, cfg, tools=(), max_output_tokens=None):  # type: ignore[no-untyped-def]
+        captured.append({"tools": list(tools), "max": max_output_tokens})
+        yield "好的"
+        return {"input": 1, "output": 1}
+
+    monkeypatch.setattr(openai_compat, "_stream_once", fake_stream_once)
+    set_scripted_replies(["好的"])
+
+    msg = reply(
+        [Message("user", "hi")],
+        "deepseek/deepseek-chat",
+        break_on_tooluse=False,
+        max_output_tokens=123,
+    )
+    assert msg.content == "好的"
+    assert captured[-1]["max"] == 123
+
+    reply([Message("user", "hi")], "deepseek/deepseek-chat", break_on_tooluse=False)
+    assert captured[-1]["max"] is None  # 不传:不向接口声明上限

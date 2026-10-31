@@ -36,8 +36,8 @@ def help_cmd(ctx: CommandContext) -> None:
     print("  /help /?     本帮助          /exit /quit /q  退出")
     print("  /tools       列出可用工具     /log list       会话列表")
     print("  /resume      恢复旧会话      /model          当前模型")
-    print("  /compact     压缩历史为视图   /hooks          已注册钩子")
-    print("  /memory      查看记忆")
+    print("  /compact     机械压缩历史    /compact summarize  模型笔记压缩")
+    print("  /hooks       已注册钩子      /memory         查看记忆")
     print("其余 / 开头的输入按普通对话处理。")
 
 
@@ -151,11 +151,17 @@ def model_cmd(ctx: CommandContext) -> None:
 
 @command("compact")
 def compact_cmd(ctx: CommandContext) -> None:
-    """/compact:把当前会话历史压缩成视图(手动触发一次,完整日志不动)。
+    """/compact:压缩当前历史(默认机械式);/compact summarize 请模型写工作笔记。
 
-    没有足够可压缩的内容时什么都不做;压缩结果过不了安检(比如还有
-    没返回的工具调用)也保持现状,打一句原因。
+    - /compact           规则压缩:删思考块/截超长输出,快而免费;
+    - /compact summarize LLM 压缩:模型把旧对话归纳成一份笔记(目标/决策/
+                         现状/待办…),用笔记替换旧历史,适合"干货太多
+                         机械压缩压不动"的长会话(要花一次模型调用)。
+    两种都只在交互边界动历史,完整日志(conversation.jsonl)一个字节不改。
     """
+    if ctx.args and ctx.args[0] == "summarize":
+        _compact_summarize(ctx)
+        return
     from my_agent_alpha.compaction import compact_current_to_view
 
     try:
@@ -170,6 +176,26 @@ def compact_cmd(ctx: CommandContext) -> None:
         f"  (已压缩为视图 {view_id}:{len(ctx.manager)} 条,"
         f"完整历史仍为 {len(ctx.manager.master_messages)} 条)"
     )
+
+
+def _compact_summarize(ctx: CommandContext) -> None:
+    """执行 /compact summarize:调模型写笔记,失败/无收益/笔记不合格都保持现状。"""
+    from my_agent_alpha.compaction_llm import compact_current_with_llm
+
+    try:
+        result = compact_current_with_llm(ctx.manager, model=ctx.model)
+    except ValueError as e:
+        print(f"  (笔记不合格,已保持现状:{e})")
+        return
+    if result.status == "success":
+        summary_path = ctx.manager.logdir / "views" / "summaries" / f"{result.view_id}.md"
+        print(
+            f"  (已请模型压缩为视图 {result.view_id}:"
+            f"约 {result.tokens_before} → {result.tokens_after} tokens;"
+            f"笔记存档 {summary_path.name})"
+        )
+        return
+    print(f"  (模型压缩未执行({result.status}):{result.reason},保持现状)")
 
 
 @command("hooks")
