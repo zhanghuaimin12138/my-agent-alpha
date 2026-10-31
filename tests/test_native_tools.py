@@ -161,12 +161,13 @@ def _tool_events() -> Any:
         function = SimpleNamespace(name=name, arguments=args)
         return SimpleNamespace(index=index, id=id, function=function)
 
-    def delta(**kwargs: Any) -> Any:
+    def delta(finish_reason: str | None = None, **kwargs: Any) -> Any:
         return SimpleNamespace(
             usage=None,
             choices=[
                 SimpleNamespace(
-                    delta=SimpleNamespace(reasoning_content=None, content=None, **kwargs)
+                    delta=SimpleNamespace(reasoning_content=None, content=None, **kwargs),
+                    finish_reason=finish_reason,
                 )
             ],
         )
@@ -177,7 +178,7 @@ def _tool_events() -> Any:
             delta(tool_calls=[tc(0, id="call_1", name="save")]),
             delta(tool_calls=[tc(0, args='{"pa')]),
             delta(tool_calls=[tc(0, args='th": "a.t')]),
-            delta(tool_calls=[tc(0, args='xt", "content": "hi"}')]),
+            delta(tool_calls=[tc(0, args='xt", "content": "hi"}')], finish_reason="tool_calls"),
             SimpleNamespace(
                 usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2),
                 choices=[],

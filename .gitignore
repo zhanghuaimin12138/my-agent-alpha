@@ -9,6 +9,7 @@ wheels/
 
 # 临时材料目录(测试用例素材等,不进版本库)
 tmp
+docs/plan
 
 # Virtual environments
 .venv

@@ -1,10 +1,15 @@
-"""上下文压缩:对话太长时,把"发给模型的视图"缩小,磁盘日志一个字节不动。
+"""上下文压缩:对话太长时,把"发给模型的历史"缩小,磁盘日志一个字节不动。
 
 为什么需要:模型每次请求都要全量重发历史(模型无记忆),对话越长请求越大,
 直到超过模型的上下文窗口,直接被接口拒绝。gptme 的解法是压缩历史 ——
-我们采用它的规则式三阶段(快、确定性、不需要再调一次模型),但做一个
-重要简化:gptme 把压缩结果存成"视图文件"切换着用,我们**每次请求时现算**
-(日志永不改写,视图永不落盘 —— 符合 AGENTS.md 的架构纪律)。
+我们采用它的规则式三阶段(快、确定性、不需要再调一次模型)。
+
+压缩结果有两个去处,别混淆(开发方案 §5.1):
+- 每次请求前的临时组装:prepare_messages() 现算现用,不落盘;
+- 持久化视图:/compact 手动触发时,compact_current_to_view() 把一次
+  成功的压缩固化成 views/compacted-NNN.jsonl,之后模型读视图、新消息
+  双写。两种去处共用同一个 compact_messages(),磁盘上的完整日志
+  (conversation.jsonl)永远不被压缩改写。
 
 三阶段(和 gptme 的 auto_compact_log 一致,顺序执行):
 
@@ -16,7 +21,8 @@
 阶段 3:压缩长回复。很老又很长的模型回复(且不含工具调用),做抽取式
         压缩:按句子打分保留高分的前 70%(代码块永远完整保留)。
 
-兜底:三阶段后仍超预算 → 保留 pinned 消息 + 尽量多的尾部消息(硬截断)。
+兜底:三阶段后仍超预算 → 按"完整工具交互组"保留 pinned + 尽量多的
+尾部(调用和结果永远同进同退,绝不拆散配对)。
 """
 
 from __future__ import annotations
@@ -25,12 +31,18 @@ import hashlib
 import logging
 import re
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from my_agent_alpha.context import get_logdir
 from my_agent_alpha.llm.models import resolve_model
 from my_agent_alpha.message import Message
+from my_agent_alpha.tools.base import ToolUse
 from my_agent_alpha.utils import get_context_budget, len_tokens
+
+if TYPE_CHECKING:  # 只做类型标注,不让压缩模块反向依赖日志管理(避免循环导入)
+    from my_agent_alpha.logmanager import LogManager
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +70,10 @@ def strip_old_thinking(messages: list[Message]) -> list[Message]:
         if msg.role == "assistant" and "<think>" in msg.content:
             stripped = _THINK_RE.sub("", msg.content).strip()
             if stripped != msg.content:
-                result[i] = Message("assistant", stripped, timestamp=msg.timestamp)
+                # 用 replace 只换 content,其余字段(call_id/pinned/hide/quiet/
+                # metadata/时间戳)原样带到新实例 —— 手写 Message(...) 会把这些
+                # 全部丢掉,压缩后的历史就"失真"了
+                result[i] = replace(msg, content=stripped)
     return result
 
 
@@ -89,10 +104,11 @@ def truncate_tool_results(
         msg = result[target_idx]
         archive = _archive_content(msg.content, logdir)
         note = f"完整输出: {archive}" if archive else "完整输出见会话日志"
-        result[target_idx] = Message(
-            "system",
-            f"[内容已截断 - 约 {target_size} tokens]\n{note}\n\n{msg.content[:400]}…",
-            timestamp=msg.timestamp,
+        # replace 保住 call_id 等全部字段:原生工具调用的结果丢了编号,
+        # 压缩后的历史就再也配不回它的调用(接口直接 400)
+        result[target_idx] = replace(
+            msg,
+            content=f"[内容已截断 - 约 {target_size} tokens]\n{note}\n\n{msg.content[:400]}…",
         )
     return result
 
@@ -175,45 +191,88 @@ def compress_long_replies(messages: list[Message]) -> list[Message]:
     """阶段 3:又老又长、且不含工具调用的模型回复,压缩到七成。
 
     含工具调用的回复不压 —— 那是执行记录,动了会破坏"日志可回放"。
+    调用判断用 ToolUse 解析器(两种通道都认),不靠肉眼猜文本特征:
+    只查 "@" 会漏掉 markdown 围栏调用,只查 "```" 会误伤纯展示代码块。
     """
     result = list(messages)
     total = len(result)
     for i in range(total - 3):  # 距结尾 ≥3 的才算"老"
         msg = result[i]
-        if msg.role != "assistant" or "```" in msg.content or "@" in msg.content:
+        if msg.role != "assistant":
             continue
+        if any(True for _ in ToolUse.iter_from_content(msg.content)):
+            continue  # 带工具调用(任意通道)的回复:执行记录,不动
         if len_tokens(msg.content) < _LONG_REPLY_THRESHOLD:
             continue
-        result[i] = Message("assistant", compress_reply(msg.content), timestamp=msg.timestamp)
+        # replace 保住全部附属字段(理由同阶段 1/2)
+        result[i] = replace(msg, content=compress_reply(msg.content))
     return result
 
 
-def hard_cap(messages: list[Message], budget: int) -> list[Message]:
-    """兜底:还超预算的话,保留 pinned + 从尾往前的尽可能多消息。
+def tool_groups(messages: Sequence[Message]) -> list[list[Message]]:
+    """把消息流切成"交互组",组是裁剪的最小单位,绝不从中间劈开。
 
-    (走到这一步说明规则压缩救不回来,宁可丢最旧的非 pinned 历史也不让请求失败)
+    一组 = 一条 assistant 回复 + 它后面的全部 system 随从(工具结果/[用量]
+    统计,直到下一条 user/assistant 为止),或者一条孤立的 user/system。
+    为什么 assistant 的随从必须和它绑在一起:原生调用有铁律
+    "一个 call_id 恰好配一条结果",把调用留在视图、结果裁掉(或反过来),
+    这段历史发给接口就是 400。多条调用、多条结果同理整组进退。
+    user 消息必须打断分组:它是回合边界,不是任何 assistant 的随从。
+
+    (公开函数:LLM 语义压缩 compaction_llm.py 也用它来拆"待摘要前缀/
+    原样尾部",两处必须用同一套分组规则,不能各写一份。)
+
+    示例:[提示词, user, assistant(两个调用), 用量, 结果1, 结果2, user]
+    → [[提示词], [user], [assistant,用量,结果1,结果2], [user]]
+    """
+    groups: list[list[Message]] = []
+    followers: list[Message] | None = None  # 当前 assistant 还在收随从的组
+    for msg in messages:
+        if msg.role == "assistant":
+            if followers is not None:
+                groups.append(followers)
+            followers = [msg]
+        elif msg.role == "system" and followers is not None:
+            followers.append(msg)  # assistant 的随从(结果/用量统计)
+        else:
+            if followers is not None:
+                groups.append(followers)
+                followers = None
+            groups.append([msg])  # user 或开场的孤立 system:自己一组
+    if followers is not None:
+        groups.append(followers)
+    return groups
+
+
+def hard_cap(messages: list[Message], budget: int) -> list[Message]:
+    """兜底:还超预算的话,按完整交互组保留 pinned + 从尾往前的尽可能多组。
+
+    (走到这一步说明规则压缩救不回来,宁可整组丢掉最旧的非 pinned 历史,
+    也不让请求失败 —— 但绝不把一个工具调用和它的结果拆到两边。)
     """
     if len_tokens(messages) <= budget:
         return messages
-    pinned = [m for m in messages if m.pinned]
-    tail: list[Message] = []
-    used = len_tokens(pinned)
-    for msg in reversed(messages):
-        if msg.pinned:
-            continue
-        cost = len_tokens(msg.content)
+    groups = tool_groups(messages)
+    # pinned 恒留:按组判(组内任一条 pinned 就整组留),保持原有先后顺序
+    pinned_groups = [g for g in groups if any(m.pinned for m in g)]
+    used = len_tokens([m for g in pinned_groups for m in g])
+    tail: list[list[Message]] = []
+    for g in reversed(groups):
+        if any(m.pinned for m in g):
+            continue  # 已经单独保留过了
+        cost = len_tokens(g)
         if used + cost > budget and tail:
-            break  # 至少保留一条,避免极端小预算下空上下文
-        tail.append(msg)
+            break  # 至少保一组,避免极端小预算下空上下文
+        tail.append(g)
         used += cost
     tail.reverse()
-    return pinned + tail
+    return [m for g in pinned_groups for m in g] + [m for g in tail for m in g]
 
 
 def compact_messages(
     messages: list[Message], budget: int, logdir: Path | None = None
 ) -> list[Message]:
-    """压缩总入口:超预算才动,不超原样返回(阶段 1 的剥思考除外,它永远划算)。
+    """规则式压缩总入口:超预算才动,不超原样返回(阶段 1 的剥思考除外,它永远划算)。
 
     示例:
         view = compact_messages(log.messages, budget=get_context_budget(128000))
@@ -233,7 +292,7 @@ def compact_messages(
 def prepare_messages(
     messages: Sequence[Message], model: str, budget: int | None = None
 ) -> list[Message]:
-    """决定"发给模型哪些消息":超预算时压缩视图,日志本身不动。
+    """决定"发给模型哪些消息":超预算时压缩视图,临时上下文，不落日志。
 
     - budget 不传时按模型的上下文窗口自动算(见上方 get_context_budget);
     - 压缩只改这份返回值(视图),log.messages 原封不动 —— 磁盘日志永不改写;
@@ -242,3 +301,102 @@ def prepare_messages(
     meta = resolve_model(model)
     effective = budget if budget is not None else get_context_budget(meta.context)
     return compact_messages(list(messages), effective, get_logdir())
+
+
+# ---------------- 压缩视图接入(V4)----------------
+# prepare_messages 是"每次请求前的临时组装"(不落盘);下面这组函数把
+# 一次成功的规则压缩"固化"成持久化视图。两者的区别见开发方案 §5.1。
+
+
+def _is_llm_checkpoint(msg: Message) -> bool:
+    """判断一条消息是不是 LLM 压缩笔记(靠 metadata 里的固定记号)。
+
+    只在安检里用:笔记虽是 pinned system,但它本来就是压缩产物,
+    下次压缩被新笔记替换是设计行为,不该按"丢了 pinned 提示词"拒绝。
+    (判断逻辑内联在本模块,避免 compaction ↔ compaction_llm 循环导入。)
+    """
+    compaction_meta = (msg.metadata or {}).get("compaction")
+    return isinstance(compaction_meta, dict) and compaction_meta.get("kind") == "llm_checkpoint"
+
+
+def validate_compacted_messages(source: Sequence[Message], compacted: Sequence[Message]) -> None:
+    """激活视图前的校验:传入压缩后的 msgs,判断是否是合格的压缩后产物,
+    检查不通过就抛 ValueError,拒绝激活。
+
+    检查四件事(见开发方案 §5.2.5):
+    1. pinned 的系统提示词一条不少(它们是模型的身份/工具说明,丢了模型就失忆);
+    2. source 的最后一条 user 消息还在(最新的用户意图不能被压没);
+    3. 原生工具调用与结果按 call_id 一一配对:既没有"有调用无结果",
+       也没有孤儿结果(同一编号出现两次也算坏);
+    4. 以上任一不满足 → 抛错,由调用方决定继续用旧视图。
+
+    匹配用对象同一性(is)而不是 Message 相等:pinned 提示词和最新 user
+    消息不会被压缩阶段改动,原对象必须原样出现在结果里;相等性只比较
+    role/content,两条不同消息内容撞车时会误判"还在"。
+    一个精确的例外:LLM 压缩笔记(metadata 里 compaction.kind =
+    "llm_checkpoint"的消息)虽然是 pinned system,但它本来就是压缩产物,
+    下一次压缩时被新笔记替换是设计行为,不在"不可丢"之列。
+    """
+    for m in source:
+        if (
+            m.pinned
+            and m.role == "system"
+            and not _is_llm_checkpoint(m)
+            and not any(m is c for c in compacted)
+        ):
+            raise ValueError(f"压缩丢了 pinned 系统提示词:{m.content[:50]}…")
+    last_user = None
+    for m in source:
+        if m.role == "user":
+            last_user = m
+    if last_user is not None and not any(last_user is c for c in compacted):
+        raise ValueError("压缩丢了最后一条用户消息(最新意图不能被压没)")
+    calls = [
+        tu.call_id
+        for m in compacted
+        if m.role == "assistant"
+        for tu in ToolUse.iter_from_content(m.content)
+        if tu.call_id
+    ]
+    results = [m.call_id for m in compacted if m.call_id]
+    if sorted(calls) != sorted(results):
+        orphan = sorted(set(results) - set(calls))
+        unmatched = sorted(set(calls) - set(results))
+        raise ValueError(
+            f"压缩后工具调用配对不完整(未配对的调用 {unmatched} / 孤儿结果 {orphan});"
+            "本回合可能还有没返回的工具调用,等它收尾再压缩"
+        )
+
+
+def is_meaningful_reduction(source: Sequence[Message], compacted: Sequence[Message]) -> bool:
+    """压缩收益值不值得建一份新视图:至少省下一成才算,否则白多一个文件。
+
+    示例:10 万 tokens 压到 8.5 万 → True;压到 9.5 万 → False(不值得)。
+    """
+    if not source:
+        return False
+    return len_tokens(compacted) <= len_tokens(source) * 0.9
+
+
+def compact_current_to_view(
+    manager: LogManager, model: str, budget: int | None = None
+) -> str | None:
+    """把"当前有效历史"压缩一次并固化成新视图;无收益或危险时返回 None。
+
+    这是手动压缩(/compact)与自动压缩(turn.post 钩子)共用的服务函数,
+    一个会话只在交互边界调用它:
+    - 压缩源是 manager.messages(激活过视图就是上一次的视图,不是反复
+      压整个 Master—— 重复压会一次次丢细节);
+    - budget 缺省用模型的全预算;自动压缩会传一个更紧的目标(压到
+      触发线以下,保证这次压缩真的有收益,而不是压了个寂寞);
+    - 压缩结果先过 validate_compacted_messages 安检,不过就抛错不激活,
+      旧视图原样继续用;
+    - 收益不足一成(is_meaningful_reduction)就不建视图,返回 None。
+    """
+    source = list(manager.messages)
+    effective = budget if budget is not None else get_context_budget(resolve_model(model).context)
+    result = compact_messages(source, effective, manager.logdir)
+    if not is_meaningful_reduction(source, result):
+        return None
+    validate_compacted_messages(source, result)
+    return manager.create_compacted_view(result)

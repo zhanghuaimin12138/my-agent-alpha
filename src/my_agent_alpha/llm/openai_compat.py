@@ -227,6 +227,7 @@ def _stream_once(
     meta: ModelMeta,
     cfg: ProviderCfg,
     tools: Sequence[ToolSpec] = (),
+    max_output_tokens: int | None = None,
 ) -> Generator[str, None, dict[str, int] | None]:
     """发起一次流式请求(不含重试逻辑)。
 
@@ -237,6 +238,10 @@ def _stream_once(
     参数 JSON 一凑齐就产出 "@工具名(编号): {参数}" 行 —— 和思考/正文
     混在同一条文本流里,下游解析不用分情况;
     请求结束时把 token 用量作为生成器的返回值带回。
+    max_output_tokens:可选的回复长度上限;不传(None)不向接口声明,
+    所有旧调用行为不变。目前只有 LLM 压缩的摘要调用用它限制笔记长度。
+    流异常结束(接口从头到尾没给结束标记 finish_reason)时抛 RuntimeError:
+    半截回复当成完整回复存下来,比报错更难排查。
     """
     client = _make_client(cfg)
     create_kwargs: dict[str, Any] = {
@@ -245,6 +250,8 @@ def _stream_once(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    if max_output_tokens is not None:
+        create_kwargs["max_tokens"] = max_output_tokens
     if tools:  # 如果tools不为空，说明支持原生工具调用，要新增kwargs["tools"],内容是固定json scheme
         create_kwargs["tools"] = [spec_to_openai_tool(t) for t in tools if t.is_runnable]
     events = client.chat.completions.create(  # 正式发起http请求
@@ -267,6 +274,9 @@ def _stream_once(
         └── usage """
     usage: dict[str, int] | None = None
     in_think = False
+    # 接口的结束标记("stop"/"tool_calls"……):正常结束的流,最后一个带回答的
+    # chunk 上一定有它;整条流结束都没见到 → 中途被掐断了(见循环后的判断)
+    finish_reason: str | None = None
 
     # 原生调用分片的拼装处:index → 对应某一个调用，同一个调用的不同碎片，index相同
     # (id 和 name 只在第一片出现;arguments 是逐字符到达的,要拼)
@@ -278,7 +288,10 @@ def _stream_once(
             usage = _extract_usage(event.usage)  # 解析usage
         if not event.choices:  # 没有回答则continue
             continue
-        delta = event.choices[0].delta  # 拿到部分回答（增量）
+        choice = event.choices[0]
+        if getattr(choice, "finish_reason", None):
+            finish_reason = str(choice.finish_reason)  # 记下结束标记(只出现一次)
+        delta = choice.delta  # 拿到部分回答（增量）
         reasoning = getattr(
             delta, "reasoning_content", None
         )  # 尝试拿到思考过程（只有思考模型才有）
@@ -311,22 +324,43 @@ def _stream_once(
                 acc["args"] += fn.arguments
 
             # 检查一个调用是否拼装完成(大括号配对 + 能解析)就立刻产出调用行,
+            # 参数末尾可能带空白(有的服务商发格式化过的多行 JSON):
+            # 先去尾再判断,不然"大括号闭了但后面跟个空格"就永远凑不齐
+            args_probe = acc["args"].rstrip()
             args_ready = (
                 acc["name"]
                 and not acc["done"]  # 还没yield
-                and acc["args"].startswith("{")  # 参数是个 JSON 对象
-                and find_json_end(acc["args"], 0) == len(acc["args"])  # 大括号恰好闭合到末尾
+                and args_probe.startswith("{")  # 参数是个 JSON 对象
+                and find_json_end(args_probe, 0) == len(args_probe)  # 大括号恰好闭合到末尾
             )
             if args_ready:
                 try:
-                    json.loads(acc["args"])  # json解析，出错就丢
+                    json.loads(args_probe)  # json解析，出错就丢
                 except json.JSONDecodeError:
                     continue
-                yield f"@{acc['name']}({acc['id']}): {acc['args']}\n"  # yield工具调用：str()
+                # 工具调用是"正式动作",不属于思考:think 还开着就必须先关掉再产出调用行
+                # (2026-11-01 踩坑:glm 思考模型"思考完直接发调用、全程没有正文",
+                #  调用行被包进 <think> 里;解析器按规矩把 think 里的调用当草稿扔掉,
+                #  结果工具一次都没执行,模型下一轮还以为结果丢了)
+                if in_think:
+                    yield "</think>"
+                    in_think = False
+                yield f"@{acc['name']}({acc['id']}): {args_probe}\n"  # yield工具调用：str()
                 acc["done"] = "1"
 
     if in_think:
         yield "</think>"
+        in_think = False
+    # 收尾兜底:拼了一半但从未"恰好闭合"的调用(最典型:无参数工具,arguments
+    # 全程是空串)在这里补产出 —— 不补就是静默丢一次工具调用,模型和用户都看不出来
+    for acc in tool_acc.values():
+        if acc["name"] and not acc["done"]:
+            args = acc["args"].strip() or "{}"  # 没有参数就按空对象 {} 补
+            yield f"@{acc['name']}({acc['id']}): {args}\n"
+    # 正常结束的流一定带结束标记;没有 → 中途被掐断(断网/服务端异常),
+    # 宁可报错也不把半截回复当成完整回复存下来(仿 gptme llm_openai.py 的做法)
+    if finish_reason is None:
+        raise RuntimeError("流式回复异常结束:接口没返回结束标记(finish_reason),内容可能不完整")
     return usage
 
 
@@ -335,17 +369,18 @@ def stream(
     meta: ModelMeta,
     cfg: ProviderCfg,
     tools: Sequence[ToolSpec] = (),
+    max_output_tokens: int | None = None,
 ) -> Generator[str, None, dict[str, int] | None]:
     """流式调用,外面包一层重试。
 
     规则:还没吐出任何内容时出错 → 等一会儿重试;
     已经吐出过内容后出错 → 直接抛出(内容没法收回,重试会导致重复)。
-    tools 参数原样传给单次尝试(原生工具调用)。
+    tools / max_output_tokens 参数原样传给单次尝试。
     """
     for attempt in range(_MAX_RETRIES + 1):
         emitted = False
         try:
-            gen = _stream_once(messages, meta, cfg, tools)
+            gen = _stream_once(messages, meta, cfg, tools, max_output_tokens)
             while True:
                 chunk = next(gen)
                 emitted = True

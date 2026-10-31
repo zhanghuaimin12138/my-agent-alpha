@@ -38,6 +38,7 @@ def _reset_agent_state(
     """
     from my_agent_alpha import context
     from my_agent_alpha.confirm import clear_confirm_hooks
+    from my_agent_alpha.hooks import autocompact as autocompact_mod
     from my_agent_alpha.hooks import clear_hooks
     from my_agent_alpha.hooks import todo as todo_hooks_mod
     from my_agent_alpha.llm import mock as llm_mock
@@ -54,9 +55,10 @@ def _reset_agent_state(
     clear_confirm_hooks()
     clear_hooks()
     # todo 的清单(tools.todo)与门控计数(hooks.todo)是模块级状态,
-    # 不随注册表清空,得逐个归零
+    # 不随注册表清空,得逐个归零;autocompact 的冷却计数同理
     todo_mod.reset_todos()
     todo_hooks_mod.reset_gate_warnings()
+    autocompact_mod.reset_autocompact()
     with context.agent_context(workspace, logdir):
         yield
     llm_mock.clear_scripted()

@@ -54,8 +54,10 @@ def print_message(msg: Message) -> None:
 def replay(manager: LogManager) -> None:
     """把会话历史打印到终端(恢复旧会话 / /resume 切换时用)。
 
+    读完整历史(master_messages)而不是压缩后的视图:回放是给人看的,
+    用户应当看到从头到尾的真实对话;模型上下文才用视图,两回事。
     复用 print_message 的显示规则,现场聊天时看到什么样,回放就什么样
     (系统提示词这类 hide/quiet 消息照旧不显示)。
     """
-    for msg in manager.messages:
+    for msg in manager.master_messages:
         print_message(msg)
