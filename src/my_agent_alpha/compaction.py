@@ -209,7 +209,7 @@ def compress_long_replies(messages: list[Message]) -> list[Message]:
     return result
 
 
-def _tool_groups(messages: Sequence[Message]) -> list[list[Message]]:
+def tool_groups(messages: Sequence[Message]) -> list[list[Message]]:
     """把消息流切成"交互组",组是裁剪的最小单位,绝不从中间劈开。
 
     一组 = 一条 assistant 回复 + 它后面的全部 system 随从(工具结果/[用量]
@@ -218,6 +218,9 @@ def _tool_groups(messages: Sequence[Message]) -> list[list[Message]]:
     "一个 call_id 恰好配一条结果",把调用留在视图、结果裁掉(或反过来),
     这段历史发给接口就是 400。多条调用、多条结果同理整组进退。
     user 消息必须打断分组:它是回合边界,不是任何 assistant 的随从。
+
+    (公开函数:LLM 语义压缩 compaction_llm.py 也用它来拆"待摘要前缀/
+    原样尾部",两处必须用同一套分组规则,不能各写一份。)
 
     示例:[提示词, user, assistant(两个调用), 用量, 结果1, 结果2, user]
     → [[提示词], [user], [assistant,用量,结果1,结果2], [user]]
@@ -249,7 +252,7 @@ def hard_cap(messages: list[Message], budget: int) -> list[Message]:
     """
     if len_tokens(messages) <= budget:
         return messages
-    groups = _tool_groups(messages)
+    groups = tool_groups(messages)
     # pinned 恒留:按组判(组内任一条 pinned 就整组留),保持原有先后顺序
     pinned_groups = [g for g in groups if any(m.pinned for m in g)]
     used = len_tokens([m for g in pinned_groups for m in g])
