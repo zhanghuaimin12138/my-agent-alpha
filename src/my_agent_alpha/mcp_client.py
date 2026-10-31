@@ -429,5 +429,4 @@ def connect_mcp_tools(workspace: Path) -> list[SyncMCPClient]:
     specs, clients = create_mcp_tools(config.mcp_servers)
     if specs:
         add_tools(specs)  # 内置表基础上追加(名字带"服务器."前缀,不会撞)
-        print(f"(MCP:已接入 {len(specs)} 个远端工具)")
     return clients
