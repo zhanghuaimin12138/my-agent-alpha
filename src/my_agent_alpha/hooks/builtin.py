@@ -43,9 +43,11 @@ def register_builtin_hooks() -> None:
     register_hook("builtin.usage", HookType.GENERATION_POST, usage_hook, priority=0)
     register_hook("builtin.session_info", HookType.SESSION_START, session_info_hook, priority=0)
 
-    # 会话自动命名(turn.post);todo 工具的门控与重放
+    # 会话自动命名(turn.post);todo 工具的门控与重放;上下文自动压缩(turn.post)
+    from my_agent_alpha.hooks.autocompact import register_autocompact_hook
     from my_agent_alpha.hooks.naming import register_naming_hook
     from my_agent_alpha.hooks.todo import register_todo_hooks
 
     register_naming_hook()
     register_todo_hooks()
+    register_autocompact_hook()

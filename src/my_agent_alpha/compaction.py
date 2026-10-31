@@ -355,19 +355,24 @@ def is_meaningful_reduction(source: Sequence[Message], compacted: Sequence[Messa
     return len_tokens(compacted) <= len_tokens(source) * 0.9
 
 
-def compact_current_to_view(manager: LogManager, model: str) -> str | None:
+def compact_current_to_view(
+    manager: LogManager, model: str, budget: int | None = None
+) -> str | None:
     """把"当前有效历史"压缩一次并固化成新视图;无收益或危险时返回 None。
 
-    这是手动压缩(/compact)的服务函数,一个会话只在交互边界调用它:
+    这是手动压缩(/compact)与自动压缩(turn.post 钩子)共用的服务函数,
+    一个会话只在交互边界调用它:
     - 压缩源是 manager.messages(激活过视图就是上一次的视图,不是反复
       压整个 Master—— 重复压会一次次丢细节);
+    - budget 缺省用模型的全预算;自动压缩会传一个更紧的目标(压到
+      触发线以下,保证这次压缩真的有收益,而不是压了个寂寞);
     - 压缩结果先过 validate_compacted_messages 安检,不过就抛错不激活,
       旧视图原样继续用;
     - 收益不足一成(is_meaningful_reduction)就不建视图,返回 None。
     """
     source = list(manager.messages)
-    budget = get_context_budget(resolve_model(model).context)
-    result = compact_messages(source, budget, manager.logdir)
+    effective = budget if budget is not None else get_context_budget(resolve_model(model).context)
+    result = compact_messages(source, effective, manager.logdir)
     if not is_meaningful_reduction(source, result):
         return None
     validate_compacted_messages(source, result)
