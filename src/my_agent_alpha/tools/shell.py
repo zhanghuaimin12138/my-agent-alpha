@@ -2,7 +2,8 @@
 
 阶段 1 用 subprocess.run 逐命令执行;gptme 的持久 bash 会话、哨兵协议、
 超时晋升后台、允许/拒绝列表、shellcheck 都属后续硬化(阶段 4 起逐步引入)。
-当前的安全姿态 = 超时 + 输出截断 + 全量存盘,无确认(相当于 gptme 的 -y)。
+当前的安全姿态 = 超时 + 输出截断(截断发生才把全量存盘,给模型留恢复路径),
+无确认(相当于 gptme 的 -y)。
 """
 
 from __future__ import annotations
@@ -32,8 +33,9 @@ def _truncate(text: str, limit: int) -> str:
 def _save_full_output(command: str, text: str) -> Path | None:
     """把完整输出存成一个文件(会话目录/tool-outputs/shell/ 下),返回文件路径。
 
-    终端里显示的是截断版,但完整版不能丢 —— 模型需要时可以自己去读这个文件。
-    没有会话目录(少数调用场景)就返回 None。
+    只在输出真的被截断时才调用:消息里那份被砍了,这个文件就是恢复路径,
+    模型需要中间那段时可以自己去读。没截断就不存 —— 主日志里已有一字不差
+    的全文,再写一份没有任何读者。没有会话目录(少数调用场景)就返回 None。
     """
     logdir = get_logdir()
     if logdir is None:
@@ -81,12 +83,14 @@ def execute_shell(
         output += ("\n" if output else "") + proc.stderr
     output = output.rstrip("\n") or "(无输出)"
 
-    full_path = _save_full_output(command, output)
-    truncated = _truncate(output, _MAX_OUTPUT_CHARS) != output
-    note = f"\n(输出过长已截断,完整输出: {full_path})" if full_path and truncated else ""
+    shown = _truncate(output, _MAX_OUTPUT_CHARS)
+    # 存盘和截断绑在一起(仿 gptme"先存盘再截断"):文件是模型的恢复路径,
+    # 提示行里会附路径。没截断时主日志里已有全文,再写一份是纯复制,不写
+    full_path = _save_full_output(command, output) if shown != output else None
+    note = f"\n(输出过长已截断,完整输出: {full_path})" if full_path else ""
     yield Message(
         "system",
-        f"$ {command}\n{_truncate(output, _MAX_OUTPUT_CHARS)}\nReturnCode: {proc.returncode}{note}",
+        f"$ {command}\n{shown}\nReturnCode: {proc.returncode}{note}",
     )
 
 

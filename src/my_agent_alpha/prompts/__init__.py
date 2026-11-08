@@ -13,9 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
-from pathlib import Path
 
-from my_agent_alpha.memory_store import render_memory_index
 from my_agent_alpha.message import Message, utcnow
 from my_agent_alpha.tools.base import ToolSpec
 
@@ -136,16 +134,11 @@ def get_prompt(
     return [static, dynamic]
 
 
-def session_opening_messages(
-    tools: Sequence[ToolSpec], *, native: bool, workspace: Path
-) -> list[Message]:
-    """新会话开场要写进日志的系统消息:说明书两条 + 长期记忆索引(有才加)。
+def session_opening_messages(tools: Sequence[ToolSpec], *, native: bool) -> list[Message]:
+    """新会话开场要写进日志的系统消息:说明书两条(静态 + 时间)。
 
-    记忆索引这条也标 pinned + hide:发给模型,但不在终端打印、压缩时不删
-    (gptme 的做法,64KB 预算)。
+    长期记忆索引**不在这里**:它是易变内容(memory 工具随时会改),
+    写进日志就永远停在开场快照。改为每次请求组装上下文时动态注入,
+    见 compaction.prepare_messages(gptme 的 dynamic 提示词层同款思路)。
     """
-    msgs = get_prompt(tools, native=native)
-    mem_index = render_memory_index(workspace)
-    if mem_index:
-        msgs.append(Message("system", mem_index, pinned=True, hide=True))
-    return msgs
+    return get_prompt(tools, native=native)

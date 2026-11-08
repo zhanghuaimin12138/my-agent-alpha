@@ -289,11 +289,23 @@ def test_shell_truncation_saves_full_output(
     assert "500" in files[0].read_text(encoding="utf-8")
 
 
-def test_shell_full_output_files_never_collide(workspace: Path, logdir: Path) -> None:
+def test_shell_full_output_files_never_collide(
+    workspace: Path, logdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from my_agent_alpha.tools import shell as shell_mod
+
+    # 全量存盘只在截断发生时做,所以把限额压低,逼三次调用都走"截断+存盘"路径
+    monkeypatch.setattr(shell_mod, "_MAX_OUTPUT_CHARS", 200)
     for _ in range(3):
-        execute_msg(Message("assistant", "```shell\necho x\n```"))
+        execute_msg(Message("assistant", "```shell\nseq 1 500\n```"))
     files = list((logdir / "tool-outputs" / "shell").glob("*.txt"))
     assert len(files) == 3  # 微秒级文件名,同一秒内也不互相覆盖
+
+
+def test_shell_short_output_not_archived(workspace: Path, logdir: Path) -> None:
+    """没截断就不写存档文件:主日志里已有全文,副本没有任何读者。"""
+    execute_msg(Message("assistant", "```shell\necho x\n```"))
+    assert not (logdir / "tool-outputs" / "shell").exists()
 
 
 # ---- 审查 #8:CRLF 归一化 ----

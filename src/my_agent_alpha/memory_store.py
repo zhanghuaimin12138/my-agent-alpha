@@ -36,6 +36,10 @@ from my_agent_alpha.dirs import get_data_dir
 # 四类封闭类型学(CC 报告 §2.4):记忆只允许这四种,别的都是可推导内容
 MEMORY_TYPES: tuple[str, ...] = ("user", "feedback", "project", "reference")
 
+# 记忆索引文本的开头记号:渲染(render_memory_index)和识别(请求组装时
+# 剔除旧日志里遗留的索引条)共用这一个常量,两边不会对不上
+MEMORY_INDEX_HEAD = "# 长期记忆"
+
 # 注入索引的双上限(CC 报告 §2.6:200 行内塞过 197KB,所以行数字节都要卡;
 # 我们两层各一份,单层配额取 CC 的一半,总量相当)
 _INDEX_MAX_LINES = 100
@@ -262,7 +266,9 @@ def rebuild_index(workspace: Path) -> None:
 
     这是给人看的镜像文件;注入模型的那份由 render_memory_index
     现算(带新鲜度),两者同行格式、数据同源。
+    顺带删掉内存里的索引缓存(save/delete 都经过这里,失效跟着走)。
     """
+    invalidate_memory_cache()
     for d in memory_dirs(workspace):
         if not d.exists():
             continue
@@ -354,6 +360,47 @@ def render_memory_index(workspace: Path) -> str:
         return ""
     # 头部带"引用前先验证"的行为协议(CC 报告 §4.5:记忆说 X 存在 ≠ X 现在存在)
     return (
-        "# 长期记忆\n(需要细节时用 read 工具查看对应文件;"
+        f"{MEMORY_INDEX_HEAD}\n(需要细节时用 read 工具查看对应文件;"
         "记忆里说的东西不一定现在还成立,引用前先验证)\n\n" + "\n\n".join(sections)
     )
+
+
+# 索引缓存:进程内就这一份 = (算缓存的工作区, 算缓存那天的日期, 渲染好的文本)。
+# 为什么只有一份:一个进程就是一个会话,一个会话只有一个工作区。
+# 三个字段是"这份缓存还作数吗"的凭证,任一不符就重算:
+# - 工作区换了 = 换了一份记忆(测试里真实发生:conftest 的默认工作区
+#   ≠ 测试自建的),绝不能把 A 项目的记忆注给 B 项目;
+# - 跨天 = 文本里"今天 / N 天前"的年龄标注是按渲染时刻算的,不重算
+#   的话模型看到的"今天"其实是昨天。
+# None = 还没算过;空文本 = 该工作区没有记忆,也是有效缓存值(和 None 区分)。
+_index_cache: tuple[Path, str, str] | None = None
+
+
+def get_memory_index(workspace: Path) -> str:
+    """取要注入模型的记忆索引(带缓存):工作区相同且同一天才命中,否则现算存起来。
+
+    每次请求组装上下文都会调它(见 compaction.prepare_messages);
+    渲染要读全部记忆文件,不缓存的话每个 step 都白读一遍。
+    记忆被改的失效见 invalidate_memory_cache。
+    """
+    global _index_cache
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    if _index_cache is not None:
+        cached_ws, cached_day, cached_text = _index_cache
+        if cached_ws == workspace and cached_day == today:
+            return cached_text
+    text = render_memory_index(workspace)
+    _index_cache = (workspace, today, text)
+    return text
+
+
+def invalidate_memory_cache() -> None:
+    """删除索引缓存(置 None):记忆改了,下次请求要注入最新的。
+
+    失效挂在 rebuild_index 上 —— save_memory/delete_memory 都经过它,
+    所以"用 memory 工具改了记忆"必然触发失效;conftest 也在测试之间
+    调它清场。已知限制:**手动**编辑记忆文件不走这条路,缓存感知不到,
+    重启会话才刷新(接受:手改是罕见路径,不值得为它加文件监听)。
+    """
+    global _index_cache
+    _index_cache = None

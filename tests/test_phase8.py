@@ -359,10 +359,81 @@ def test_e2e_memory_injected_into_session(
         non_interactive=True,
     )
     manager = LogManager.load(clean_dirs / "logs" / "c1")
-    # 精确匹配注入的记忆索引(系统提示词里也有"长期记忆"字样,别撞上)
-    seeded = [m for m in manager.messages if m.content.startswith("# 长期记忆")]
-    assert seeded and "旧约定" in seeded[0].content
-    assert seeded[0].pinned and seeded[0].hide  # 提示词类消息
+    # 日志里不该再有记忆索引(它改成了每次请求动态注入,不落盘)
+    seeded_in_log = [m for m in manager.messages if m.content.startswith("# 长期记忆")]
+    assert not seeded_in_log
+    # 请求组装时注入最新索引:pinned(压缩不删)、内容是当前记忆
+    from my_agent_alpha.compaction import prepare_messages
+    from my_agent_alpha.context import agent_context
+
+    with agent_context(ws, clean_dirs / "logs" / "c1"):
+        prepared = prepare_messages(manager.messages, "mock/echo")
+    injected = [m for m in prepared if m.content.startswith("# 长期记忆")]
+    assert injected and "旧约定" in injected[0].content
+    assert injected[0].pinned and injected[0].hide  # 提示词类消息
+
+
+def test_memory_index_cache_lifecycle(clean_dirs: Path) -> None:
+    """索引缓存:首算入缓存 → save_memory 失效 → 跨天/换工作区作废重算。"""
+    from my_agent_alpha import memory_store as ms
+
+    ws = clean_dirs / "ws"
+    ws.mkdir()
+    # 没有记忆:空串也是有效缓存值(和"没算过"的 None 区分开)
+    assert ms.get_memory_index(ws) == ""
+    assert ms._index_cache is not None and ms._index_cache[2] == ""
+    ms.save_memory("第一条", "标题\n正文", ws, project_level=True)  # 内部触发失效
+    assert ms._index_cache is None  # 缓存已被删
+    text = ms.get_memory_index(ws)  # 重算,拿到新记忆
+    assert "第一条" in text and text.startswith("# 长期记忆")
+    assert ms._index_cache == (ws, ms._index_cache[1], text)  # 新值入缓存
+    # 跨天作废:把缓存日期改成过去,再取必须重算(年龄标注不能拿冻结的旧值)
+    ws_cached, _, text_cached = ms._index_cache
+    ms._index_cache = (ws_cached, "2000-01-01", text_cached)
+    assert ms.get_memory_index(ws) == text  # 内容恰好一样(文件没变)
+    assert ms._index_cache[1] != "2000-01-01"  # 但日期已刷新 → 确实重算过
+    # 换工作区作废:另一个工作区是另一份记忆,不能沿用 ws 的缓存
+    other = clean_dirs / "other"
+    other.mkdir()
+    assert ms.get_memory_index(other) == ""
+    assert ms._index_cache[0] == other
+
+
+def test_memory_injection_position_and_content(clean_dirs: Path) -> None:
+    """注入位置:开头连续 pinned 块(系统提示词)之后、第一条对话之前;内容是最新记忆。"""
+    from my_agent_alpha.compaction import prepare_messages
+    from my_agent_alpha.context import agent_context
+    from my_agent_alpha.message import Message
+    from my_agent_alpha.prompts import get_prompt
+
+    ws = clean_dirs / "ws"
+    ws.mkdir()
+    save_memory("新记忆", "新标题\n新正文", ws, project_level=True)
+    log = [*get_prompt((), native=True), Message("user", "hi"), Message("assistant", "你好")]
+    with agent_context(ws, clean_dirs / "logs" / "x"):
+        prepared = prepare_messages(log, "mock/echo")
+    indexes = [m for m in prepared if m.content.startswith("# 长期记忆")]
+    assert len(indexes) == 1 and "新记忆" in indexes[0].content
+    # 注入位置:pinned 块(两条系统提示词)之后、第一条 user 之前
+    assert prepared[2] is indexes[0] and prepared[3].role == "user"
+    # 入参列表不被就地修改(注入只影响返回值)
+    assert len(log) == 4
+
+
+def test_memory_injection_empty_when_no_memories(clean_dirs: Path) -> None:
+    """一点记忆都没有时:不注入任何索引,消息原样返回。"""
+    from my_agent_alpha.compaction import prepare_messages
+    from my_agent_alpha.context import agent_context
+    from my_agent_alpha.message import Message
+    from my_agent_alpha.prompts import get_prompt
+
+    ws = clean_dirs / "ws"
+    ws.mkdir()
+    log = [*get_prompt((), native=True), Message("user", "hi")]
+    with agent_context(ws, clean_dirs / "logs" / "y"):
+        prepared = prepare_messages(log, "mock/echo")
+    assert not [m for m in prepared if m.content.startswith("# 长期记忆")]
+    assert len(prepared) == 3  # 两条提示词 + user,原样
 
 
 # ============ M4:记忆整理("做梦") ============
