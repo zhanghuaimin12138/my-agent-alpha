@@ -102,10 +102,8 @@ def chat(
 
     manager = LogManager.load(logdir, create=True)
     if len(manager) == 0:
-        # 初始化日志（系统提示词 + 长期记忆索引）
-        for msg in session_opening_messages(
-            tools, native=tool_format == "tool", workspace=workspace
-        ):
+        # 初始化日志（系统提示词两条;记忆索引改为每次请求动态注入,不落盘）
+        for msg in session_opening_messages(tools, native=tool_format == "tool"):
             manager.append(msg, sync=True)
     else:
         # 恢复会话:回放已打印的历史

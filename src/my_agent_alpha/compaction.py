@@ -35,8 +35,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from my_agent_alpha.context import get_logdir
+from my_agent_alpha.context import get_logdir, get_workspace
 from my_agent_alpha.llm.models import resolve_model
+from my_agent_alpha.memory_store import get_memory_index
 from my_agent_alpha.message import Message
 from my_agent_alpha.tools.base import ToolUse
 from my_agent_alpha.utils import get_context_budget, len_tokens
@@ -292,15 +293,41 @@ def compact_messages(
 def prepare_messages(
     messages: Sequence[Message], model: str, budget: int | None = None
 ) -> list[Message]:
-    """决定"发给模型哪些消息":超预算时压缩视图,临时上下文，不落日志。
+    """决定"发给模型哪些消息":注入最新记忆索引 → 超预算时压缩,临时上下文，不落日志。
 
+    - 长期记忆索引在这里动态注入(不进日志,见 _inject_memory_index):
+      memory 工具随时会改记忆,写进日志的索引永远停在开场快照;
     - budget 不传时按模型的上下文窗口自动算(见上方 get_context_budget);
     - 压缩只改这份返回值(视图),log.messages 原封不动 —— 磁盘日志永不改写;
     - 详细的压缩规则见本模块上文(剥思考 → 截工具结果 → 压长回复 → 硬截断)。
     """
     meta = resolve_model(model)
     effective = budget if budget is not None else get_context_budget(meta.context)
-    return compact_messages(list(messages), effective, get_logdir())
+    assembled = _inject_memory_index(list(messages))
+    return compact_messages(assembled, effective, get_logdir())
+
+
+def _inject_memory_index(messages: list[Message]) -> list[Message]:
+    """把最新的长期记忆索引注入"发给模型的消息"里,返回新列表。
+
+    记忆索引是易变内容(memory 工具随时会改),从不落日志 —— 每次请求
+    组装上下文时在这里现注入一份:插在开头连续的 pinned 消息块之后
+    (系统提示词后面、对话之前),标 pinned(压缩兜底裁剪不删它)。
+    记忆为空(索引渲染为空串)时不注入,原样返回。
+    缓存规则见 memory_store.get_memory_index:memory 工具一改,缓存就失效。
+    """
+    text = get_memory_index(get_workspace())
+    if not text:
+        return messages
+    injected = Message(
+        "system", text, pinned=True, hide=True, metadata={"injected": "memory_index"}
+    )
+    insert_at = 0
+    while insert_at < len(messages) and messages[insert_at].pinned:
+        insert_at += 1
+    result = list(messages)  # 复制一份,不改动调用方传入的列表
+    result.insert(insert_at, injected)
+    return result
 
 
 # ---------------- 压缩视图接入(V4)----------------
